@@ -27,7 +27,7 @@ import "server-only";
  * The fallback is never silent, and it disappears the moment a real database
  * is attached.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -61,7 +61,7 @@ export function isRemoteDatabase(): boolean {
 const BLOB_PATHNAME = "projectscope-state.db";
 
 interface BlobMirror {
-  get(): Promise<Uint8Array | null>;
+  get(): Promise<{ bytes: Uint8Array; uploadedAt: number } | null>;
   put(bytes: Uint8Array): Promise<void>;
 }
 
@@ -96,7 +96,9 @@ async function createBlobMirror(): Promise<BlobMirror | null> {
         if (!result) return null;
 
         // `get()` returns a readable stream, so read it into bytes.
-        if (result instanceof Uint8Array) return result;
+        if (result instanceof Uint8Array) {
+          return { bytes: result, uploadedAt: Date.now() };
+        }
         const stream = (result as { stream?: ReadableStream<Uint8Array> }).stream;
         if (!stream) return null;
 
@@ -117,7 +119,12 @@ async function createBlobMirror(): Promise<BlobMirror | null> {
           bytes.set(chunk, offset);
           offset += chunk.byteLength;
         }
-        return bytes;
+
+        const uploadedAt = (result as { uploadedAt?: Date }).uploadedAt;
+        return {
+          bytes,
+          uploadedAt: uploadedAt ? uploadedAt.getTime() : Date.now(),
+        };
       },
       async put(bytes) {
         await put(BLOB_PATHNAME, Buffer.from(bytes), {
@@ -239,6 +246,7 @@ let pendingFlush: Promise<void> | null = null;
 async function scheduleFlush(): Promise<void> {
   if (!blobMirror) return;
   dirty = true;
+  lastWriteAt = Date.now();
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     if (!pendingFlush) {
@@ -271,23 +279,41 @@ async function scheduleFlush(): Promise<void> {
  */
 const SYNC_INTERVAL_MS = 2_000;
 let lastSyncAt = 0;
+let lastWriteAt = 0;
 
 async function refreshFromMirror(): Promise<void> {
   if (!blobMirror || !localFilePath) return;
-  if (dirty) return; // our copy has changes that are not uploaded yet
+
+  // Never refresh over data we have not uploaded yet.
+  if (dirty) return;
+  // An upload is in flight — the shared copy is about to change.
+  if (pendingFlush) return;
+  // We wrote very recently, so the shared copy is probably behind us.
+  if (Date.now() - lastWriteAt < 2_000) return;
 
   const now = Date.now();
   if (now - lastSyncAt < SYNC_INTERVAL_MS) return;
   lastSyncAt = now;
 
   try {
-    const bytes = await blobMirror.get();
-    if (!bytes || bytes.byteLength === 0) return;
+    const result = await blobMirror.get();
+    if (!result || result.bytes.byteLength === 0) return;
+
+    // Only take the shared copy if it is actually newer than ours. Without
+    // this check a slow upload can be overwritten by a stale refresh, which
+    // silently loses the rows that were just written.
+    let localModified = 0;
+    try {
+      localModified = statSync(localFilePath).mtimeMs;
+    } catch {
+      localModified = 0;
+    }
+    if (result.uploadedAt <= localModified) return;
 
     // Replace the file and reopen the client, so the connection sees the new
     // content rather than the file it had open.
     client?.close();
-    writeFileSync(localFilePath, bytes);
+    writeFileSync(localFilePath, result.bytes);
     client = createClient({ url: `file:${localFilePath}` });
   } catch {
     // A failed refresh is not fatal — the local copy still works.
@@ -347,8 +373,8 @@ export async function getDatabaseDiagnostics(): Promise<{
   let mirrorBytes: number | null = null;
   try {
     if (blobMirror) {
-      const bytes = await blobMirror.get();
-      mirrorBytes = bytes ? bytes.byteLength : 0;
+      const result = await blobMirror.get();
+      mirrorBytes = result ? result.bytes.byteLength : 0;
     }
   } catch {
     mirrorBytes = null;
@@ -383,7 +409,7 @@ async function connect(): Promise<void> {
     const existing = await blobMirror.get();
     if (existing) {
       try {
-        writeFileSync(localFilePath, existing);
+        writeFileSync(localFilePath, existing.bytes);
       } catch {
         // Fall through and start fresh.
       }
