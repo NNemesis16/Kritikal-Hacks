@@ -5,8 +5,8 @@ import path from "node:path";
 /**
  * Prepare an isolated SQLite database for the test run.
  *
- * The test database lives at `prisma/test.db` and is recreated from the
- * migrations every time the suite starts, so tests never touch the
+ * The test database lives at `prisma/test.db` and is recreated from
+ * `db/schema.sql` every time the suite starts, so tests never touch the
  * development database and never depend on leftover state.
  */
 export default function globalSetup() {
@@ -18,11 +18,8 @@ export default function globalSetup() {
     if (existsSync(file)) rmSync(file, { force: true });
   }
 
-  // Run the Prisma CLI through Node directly — `npx` is a shell script on
-  // Windows and cannot be spawned with execFileSync.
-  const prismaCli = path.join(rootDir, "node_modules", "prisma", "build", "index.js");
-
-  execFileSync(process.execPath, [prismaCli, "migrate", "deploy"], {
+  // Run the same migration script the app uses, against the test database.
+  execFileSync(process.execPath, [path.join(rootDir, "node_modules", "tsx", "dist", "cli.mjs"), "scripts/migrate.ts"], {
     cwd: rootDir,
     env: { ...process.env, DATABASE_URL: "file:./test.db" },
     stdio: "pipe",

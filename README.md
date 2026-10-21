@@ -21,6 +21,7 @@ It combines web research, AI-powered analysis, project comparison, and structure
 - [System Architecture](#-system-architecture)
 - [Getting Started](#-getting-started)
 - [Environment Configuration](#-environment-configuration)
+- [Deploy to Vercel](#-deploy-to-vercel)
 - [Demo Mode](#-demo-mode)
 - [Available Commands](#-available-commands)
 - [API Overview](#-api-overview)
@@ -174,7 +175,7 @@ Source links, attribution, and retrieval timestamps are retained where available
 
 ### Stage 3: Store and Organize Findings
 
-Research records and run information are stored using Prisma and SQLite.
+Research records and run information are stored in SQLite during development and in a hosted libSQL (Turso) database in production. The application reads and writes them with plain SQL through a small data-access layer, so there is no code generation step and no native database driver to compile.
 
 This allows the application to retrieve projects, associate results with research runs, and support subsequent analysis.
 
@@ -294,9 +295,9 @@ ProjectScope combines a modern web application framework, structured data valida
 | Tailwind CSS v4 | Styling and responsive layouts |
 | Neo-Brutalist UI system | Distinctive visual design and interface components |
 | Lenis | Smooth scrolling |
-| Prisma 7 | Database access and data modeling |
-| SQLite | Local relational database |
-| `better-sqlite3` | SQLite driver adapter |
+| libSQL | Database driver — a local SQLite file in development, a hosted Turso database in production |
+| Plain SQL | All reads and writes, in `src/lib/repo.ts` — no ORM, no code generation |
+| `db/schema.sql` | The complete database structure, in one readable file |
 | Zod v4 | Input validation and structured data validation |
 | Server-Sent Events | Live research progress updates |
 | TinyFish SDK | Search and permitted page retrieval |
@@ -349,7 +350,7 @@ The application can be understood as five cooperating layers.
 ┌───────────────────────────────────────┐
 │          DATA AND PERSISTENCE         │
 │                                       │
-│          Prisma + SQLite              │
+│        libSQL / Turso (SQL)           │
 │       Research runs and results       │
 └───────────────────────────────────────┘
 ```
@@ -428,32 +429,34 @@ See [Environment Configuration](#-environment-configuration) below.
 
 ### 4. Set Up the Database
 
-Run the Prisma migrations and generate the Prisma client:
+Apply the schema. The whole database structure lives in `db/schema.sql`, and the command below
+creates the tables in a local SQLite file inside `prisma/`:
 
 ```bash
-npx prisma migrate deploy
-npx prisma generate
+npm run db:migrate
 ```
 
-If you use Windows PowerShell and encounter command execution restrictions, use `npx.cmd` instead:
+If you use Windows PowerShell and encounter command execution restrictions, use `npm.cmd` instead:
 
 ```powershell
-npx.cmd prisma migrate deploy
-npx.cmd prisma generate
+npm.cmd run db:migrate
 ```
+
+The command is safe to run more than once — every statement in the schema is written to be
+idempotent, and it works against a hosted database just as well as a local file.
 
 ### 5. Load the Sample Dataset (Optional)
 
 To populate the application with example research runs and project records:
 
 ```bash
-npx prisma db seed
+npm run db:seed
 ```
 
 On Windows PowerShell:
 
 ```powershell
-npx.cmd prisma db seed
+npm.cmd run db:seed
 ```
 
 This step is optional, but useful when exploring the application's interface in demo mode.
@@ -506,7 +509,8 @@ Obtain credentials from the providers' official websites:
 |---|---|---|
 | `OPENAI_MODEL` | `gpt-6.1-sol` | Selects the configured OpenAI model |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Selects the configured Gemini model |
-| `DATABASE_URL` | `file:./dev.db` | Configures the SQLite database URL |
+| `DATABASE_URL` | `file:./dev.db` | Where the data lives. A local SQLite file in development, a `libsql://…` URL in production |
+| `DATABASE_AUTH_TOKEN` | Unset | Authenticates a hosted database. Leave empty for a local file |
 | `DEMO_MODE` | Unset | Set to `true` to force demo mode |
 | `MAX_RESULTS_LIMIT` | `40` | Sets the maximum number of records collected per run |
 | `PROVIDER_TIMEOUT_MS` | `45000` | Sets the timeout for external provider calls |
@@ -516,6 +520,11 @@ The model defaults shown above come from the repository configuration. Confirm t
 ### Example `.env.local`
 
 ```dotenv
+# Database — local development uses a SQLite file in prisma/
+DATABASE_URL=file:./dev.db
+# DATABASE_AUTH_TOKEN=            # only needed for a hosted database
+
+# Provider keys (all optional — without them the app runs in demo mode)
 TINYFISH_API_KEY=your_tinyfish_api_key
 OPENAI_API_KEY=your_openai_api_key
 GEMINI_API_KEY=your_gemini_api_key
@@ -529,6 +538,79 @@ PROVIDER_TIMEOUT_MS=45000
 Replace placeholder values with your own credentials. If you are exploring demo mode, you can leave the credentials blank and set `DEMO_MODE=true`.
 
 **Security note:** Do not place private credentials in client-side variables such as `NEXT_PUBLIC_*`. Do not commit `.env.local` or share your API keys in screenshots, issues, or public messages.
+
+---
+
+## 🚀 Deploy to Vercel
+
+The app is a standard Next.js project, so Vercel detects it automatically. There is no custom
+server, no Docker file and no build configuration to fight with.
+
+### Step 1 — Create a free database (2 minutes)
+
+Vercel's file system is read-only and wiped between invocations, so a local SQLite file cannot be
+deployed. Use **Turso**, a hosted SQLite-compatible database with a free tier and no credit card.
+
+1. Go to **https://turso.new** and sign in with GitHub.
+2. Click **Create Database**, name it `projectscope`, choose a location.
+3. The dashboard shows the two values you need:
+   - **Database URL** — starts with `libsql://`
+   - **Auth Token** — a long string
+
+### Step 2 — Push the code to GitHub
+
+```bash
+git add .
+git commit -m "Prepare for Vercel deployment"
+git push origin main
+```
+
+### Step 3 — Import the repository into Vercel
+
+1. Go to **https://vercel.com/new**.
+2. Sign in with the **same GitHub account** that owns the repository.
+3. Click **Add New → Project** and pick `Kritikal-Hacks`.
+4. Vercel detects **Next.js** automatically. Leave the build command as `npm run build`.
+
+### Step 4 — Add the environment variables
+
+In the Vercel project: **Settings → Environment Variables**. Add these for **Production** (and
+**Preview** as well, if you want previews to work):
+
+| Name | Value | Required? |
+|---|---|---|
+| `DATABASE_URL` | `libsql://your-database.turso.io` | **Yes** |
+| `DATABASE_AUTH_TOKEN` | the Turso auth token | **Yes** |
+| `TINYFISH_API_KEY` | from https://agent.tinyfish.ai/api-keys | No — the app runs in demo mode without it |
+| `OPENAI_API_KEY` | from https://platform.openai.com/api-keys | No — demo mode without it |
+| `GEMINI_API_KEY` | from https://aistudio.google.com/apikey | No — demo mode without it |
+| `OPENAI_MODEL` | `gpt-6.1-sol` (the default) | No |
+| `GEMINI_MODEL` | `gemini-3.8-flash` (the default) | No |
+
+> The build runs `npm run db:migrate`, so the tables are created for you the first time you
+> deploy. You do **not** need to run any migration command by hand.
+
+### Step 5 — Deploy
+
+Click **Deploy**. In about two minutes you get a URL like
+`https://kritikal-hacks.vercel.app`. Open **Settings → Domains** to add your own.
+
+**If the build fails with a database error**, the log prints a large warning. It means
+`DATABASE_URL` or `DATABASE_AUTH_TOKEN` is wrong — check for a stray space or a missing
+`libsql://` scheme.
+
+### Notes
+
+- **Function timeouts.** A research run calls three external APIs, so it needs more than the
+  default. The routes set `maxDuration = 300`; Vercel clamps that to your plan's limit
+  (60 seconds on Hobby, 300 on Pro). If a run stops halfway on Hobby, upgrade the plan or lower
+  `MAX_RESULTS_LIMIT`.
+- **Background work.** Research runs continue after the browser gets its response. That is handled
+  with Next.js `after()`, which keeps the serverless function alive until the run finishes —
+  a plain fire-and-forget call would be killed by the platform.
+- **Turning on the live providers.** The app is fully usable in demo mode (bundled sample data,
+  clearly labelled). Add the three API keys above and redeploy, and the demo banner disappears
+  automatically.
 
 ---
 
@@ -564,9 +646,10 @@ The following commands are useful during development.
 | `npm run lint` | Runs ESLint |
 | `npm test` | Runs the Vitest test suite |
 | `npm run build` | Creates a production build |
-| `npx prisma generate` | Generates the Prisma client |
-| `npx prisma migrate deploy` | Applies existing database migrations |
-| `npx prisma db seed` | Loads the sample dataset |
+| `npm run db:migrate` | Applies `db/schema.sql` to the configured database |
+| `npm run db:seed` | Loads the sample dataset |
+| `npm run db:reset` | Re-applies the schema and reloads the sample dataset |
+| `npm run setup` | `db:migrate` followed by `db:seed` |
 
 On Windows PowerShell, prefix npm and npx commands with `.cmd` if execution policy restrictions prevent them from running.
 
@@ -608,9 +691,11 @@ The repository is organized to keep the interface, business logic, provider inte
 
 ```text
 Kritikal-Hacks/
-├── prisma/
-│   ├── schema.prisma
-│   └── seed.ts
+├── db/
+│   └── schema.sql              # the whole database structure
+├── scripts/
+│   ├── migrate.ts              # applies the schema
+│   └── seed.ts                 # loads the sample dataset
 ├── src/
 │   ├── app/
 │   │   ├── page.tsx
@@ -634,28 +719,33 @@ Kritikal-Hacks/
 │   │   ├── pitch-studio.tsx
 │   │   └── export-buttons.tsx
 │   └── lib/
-│       ├── providers/
-│       │   ├── tinyfish.ts
-│       │   ├── openai.ts
-│       │   └── gemini.ts
+│       ├── providers/          # the three external integrations
+│       │   ├── tinyfish.ts     #   discovery (Search + Fetch)
+│       │   ├── openai.ts       #   normalise · cluster · compare · score · propose · pitch
+│       │   └── gemini.ts       #   market-gap report + free-choice analysis (grounded)
 │       ├── research/
-│       │   ├── collect.ts
-│       │   ├── pipeline.ts
-│       │   ├── discovery.ts
-│       │   ├── events.ts
-│       │   ├── sources.ts
-│       │   └── demo.ts
-│       ├── ai-schemas.ts
-│       ├── schema.ts
-│       ├── api.ts
-│       ├── db.ts
-│       ├── env.ts
-│       ├── errors.ts
-│       └── products.ts
-├── tests/
+│       │   ├── collect.ts      #   shared search → normalise → store stage
+│       │   ├── pipeline.ts     #   topic-driven pipeline
+│       │   ├── discovery.ts    #   free-choice pipeline
+│       │   ├── events.ts       #   persisted progress events
+│       │   ├── sources.ts      #   source policy + query construction
+│       │   └── demo.ts         #   bundled sample dataset
+│       ├── db.ts               # the database connection
+│       ├── repo.ts             # every read and write, in plain SQL
+│       ├── database-url.ts     # resolves the SQLite / libSQL URL
+│       ├── background.ts       # `after()` — keeps background runs alive on Vercel
+│       ├── ai-schemas.ts       # strict schemas for structured AI output
+│       ├── schema.ts           # request / response schemas + source registry
+│       ├── api.ts              # route-handler helpers
+│       ├── env.ts              # server-only environment
+│       ├── errors.ts           # typed errors + secret redaction
+│       ├── json.ts             # safe JSON (de)serialisation
+│       ├── products.ts         # project queries and facets
+│       └── utils.ts
+├── tests/                     # unit + integration tests
 ├── .env.example
 ├── package.json
-├── prisma.config.ts
+├── vercel.json                # Vercel project settings
 ├── vitest.config.mts
 └── README.md
 ```
@@ -666,7 +756,8 @@ Kritikal-Hacks/
 - **`src/components/`** — Reusable interface components and interactive workspaces.
 - **`src/lib/providers/`** — Integrations with TinyFish, OpenAI, and Google Gemini.
 - **`src/lib/research/`** — Research collection, processing pipelines, progress events, source policies, and demo data.
-- **`prisma/`** — Database schema, migrations, and sample-data seeding.
+- **`db/`** — The database structure, as one readable SQL file.
+- **`scripts/`** — Schema migration and sample-data seeding.
 - **`tests/`** — Automated unit and integration tests.
 
 ---

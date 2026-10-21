@@ -14,7 +14,6 @@ import "server-only";
  * run continues with whatever did succeed. The number of results we show is
  * always the number we actually found.
  */
-import { prisma } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { isDemoMode } from "@/lib/env";
 import { stringifyJson } from "@/lib/json";
@@ -42,6 +41,15 @@ import {
   DEMO_REPORT,
   DEMO_SOURCE_ID,
 } from "@/lib/research/demo";
+import {
+  updateResearchJob,
+  updateProject,
+  listResearchResults,
+  updateResearchResult,
+  upsertMarketGapReport,
+  createValidationExperiment,
+} from "@/lib/repo";
+
 
 export interface RunResearchInput {
   jobId: string;
@@ -69,7 +77,7 @@ const SOURCE_ACCESS_NOTES: Record<string, string> = {
 };
 
 async function setStage(jobId: string, stage: string, status = "running") {
-  await prisma.researchJob.update({ where: { id: jobId }, data: { stage, status } });
+  await updateResearchJob(jobId, {stage, status});
 }
 
 /* -------------------------------------------------------------------------- */
@@ -131,55 +139,16 @@ async function runDemo(context: CollectionContext, input: RunResearchInput) {
     message: "Demo mode: writing the sample market-gap report.",
   });
 
-  await prisma.marketGapReport.upsert({
-    where: { jobId: input.jobId },
-    create: {
-      jobId: input.jobId,
-      summary: DEMO_REPORT.summary,
-      gaps: stringifyJson(DEMO_REPORT.gaps),
-      patterns: stringifyJson(DEMO_REPORT.patterns),
-      competitors: stringifyJson(DEMO_REPORT.competitors),
-      assumptions: stringifyJson(DEMO_REPORT.assumptions),
-      experiments: stringifyJson(DEMO_REPORT.experiments),
-      sources: stringifyJson(DEMO_REPORT.sources),
-      isDemo: true,
-    },
-    update: {
-      summary: DEMO_REPORT.summary,
-      gaps: stringifyJson(DEMO_REPORT.gaps),
-      patterns: stringifyJson(DEMO_REPORT.patterns),
-      competitors: stringifyJson(DEMO_REPORT.competitors),
-      assumptions: stringifyJson(DEMO_REPORT.assumptions),
-      experiments: stringifyJson(DEMO_REPORT.experiments),
-      sources: stringifyJson(DEMO_REPORT.sources),
-      isDemo: true,
-    },
-  });
+  await upsertMarketGapReport(input.jobId, {summary: DEMO_REPORT.summary, gaps: stringifyJson(DEMO_REPORT.gaps), patterns: stringifyJson(DEMO_REPORT.patterns), competitors: stringifyJson(DEMO_REPORT.competitors), assumptions: stringifyJson(DEMO_REPORT.assumptions), experiments: stringifyJson(DEMO_REPORT.experiments), sources: stringifyJson(DEMO_REPORT.sources), isDemo: true});
 
   for (const experiment of DEMO_REPORT.experiments) {
-    await prisma.validationExperiment.create({
-      data: {
-        jobId: input.jobId,
-        title: experiment.title,
-        hypothesis: experiment.hypothesis,
-        method: experiment.method,
-        metric: experiment.metric,
-        successCriteria: experiment.successCriteria,
-        duration: experiment.duration,
-        cost: experiment.cost,
-        relatedGapId: experiment.relatedGapId,
-        isDemo: true,
-      },
-    });
+    await createValidationExperiment({jobId: input.jobId, title: experiment.title, hypothesis: experiment.hypothesis, method: experiment.method, metric: experiment.metric, successCriteria: experiment.successCriteria, duration: experiment.duration, cost: experiment.cost, relatedGapId: experiment.relatedGapId, isDemo: true});
   }
 
   await applyClusters(input.jobId, DEMO_CLUSTERS, records.length);
 
   await setStage(input.jobId, "done", "completed");
-  await prisma.researchJob.update({
-    where: { id: input.jobId },
-    data: { completedAt: new Date(), resultCount: records.length },
-  });
+  await updateResearchJob(input.jobId, {completedAt: new Date().toISOString(), resultCount: records.length});
 
   await emitEvent(input.jobId, {
     type: "job.completed",
@@ -202,20 +171,13 @@ async function applyClusters(
   }>,
   total: number,
 ) {
-  const results = await prisma.researchResult.findMany({
-    where: { jobId },
-    orderBy: { rank: "asc" },
-    take: total,
-  });
+  const results = await listResearchResults(jobId, { limit: total });
 
   for (const cluster of clusters) {
     for (const index of cluster.memberIndexes) {
       const result = results[index];
       if (!result) continue;
-      await prisma.project.update({
-        where: { id: result.projectId },
-        data: { clusterId: cluster.clusterId },
-      });
+      await updateProject(result.projectId, {clusterId: cluster.clusterId});
     }
   }
 }
@@ -280,10 +242,7 @@ export async function runResearch(input: RunResearchInput): Promise<void> {
           "No results were returned by the sources that were checked. Try a broader query or another source.",
       });
       await setStage(input.jobId, "done", "completed");
-      await prisma.researchJob.update({
-        where: { id: input.jobId },
-        data: { completedAt: new Date(), resultCount: 0, sourcesChecked: stringifyJson([...checks.values()]) },
-      });
+      await updateResearchJob(input.jobId, {completedAt: new Date().toISOString(), resultCount: 0, sourcesChecked: stringifyJson([...checks.values()])});
       return;
     }
 
@@ -311,15 +270,9 @@ export async function runResearch(input: RunResearchInput): Promise<void> {
     await setStage(input.jobId, "storing");
     await persistRecords(context, scored.map((entry) => entry.record), [...checks.values()]);
 
-    const stored = await prisma.researchResult.findMany({
-      where: { jobId: input.jobId },
-      orderBy: { createdAt: "asc" },
-    });
+    const stored = await listResearchResults(input.jobId, { limit: 50 });
     for (let index = 0; index < stored.length && index < scored.length; index += 1) {
-      await prisma.researchResult.update({
-        where: { id: stored[index].id },
-        data: { rank: index + 1, relevance: scored[index].relevance },
-      });
+      await updateResearchResult(stored[index].id, {rank: index + 1, relevance: scored[index].relevance});
     }
 
     await emitEvent(input.jobId, {
@@ -375,44 +328,10 @@ export async function runResearch(input: RunResearchInput): Promise<void> {
         }
       }
 
-      await prisma.marketGapReport.upsert({
-        where: { jobId: input.jobId },
-        create: {
-          jobId: input.jobId,
-          summary: report.summary,
-          gaps: stringifyJson(report.gaps),
-          patterns: stringifyJson(report.patterns),
-          competitors: stringifyJson(report.competitors),
-          assumptions: stringifyJson(report.assumptions),
-          experiments: stringifyJson(report.experiments),
-          sources: stringifyJson(mergedSources),
-          isDemo: false,
-        },
-        update: {
-          summary: report.summary,
-          gaps: stringifyJson(report.gaps),
-          patterns: stringifyJson(report.patterns),
-          competitors: stringifyJson(report.competitors),
-          assumptions: stringifyJson(report.assumptions),
-          experiments: stringifyJson(report.experiments),
-          sources: stringifyJson(mergedSources),
-        },
-      });
+      await upsertMarketGapReport(input.jobId, {summary: report.summary, gaps: stringifyJson(report.gaps), patterns: stringifyJson(report.patterns), competitors: stringifyJson(report.competitors), assumptions: stringifyJson(report.assumptions), experiments: stringifyJson(report.experiments), sources: stringifyJson(mergedSources), isDemo: false});
 
       for (const experiment of report.experiments) {
-        await prisma.validationExperiment.create({
-          data: {
-            jobId: input.jobId,
-            title: experiment.title,
-            hypothesis: experiment.hypothesis,
-            method: experiment.method,
-            metric: experiment.metric,
-            successCriteria: experiment.successCriteria,
-            duration: experiment.duration,
-            cost: experiment.cost,
-            relatedGapId: experiment.relatedGapId || null,
-          },
-        });
+        await createValidationExperiment({jobId: input.jobId, title: experiment.title, hypothesis: experiment.hypothesis, method: experiment.method, metric: experiment.metric, successCriteria: experiment.successCriteria, duration: experiment.duration, cost: experiment.cost, relatedGapId: experiment.relatedGapId || null});
       }
 
       await emitEvent(input.jobId, {
@@ -479,10 +398,7 @@ export async function runResearch(input: RunResearchInput): Promise<void> {
     }
 
     await setStage(input.jobId, "done", "completed");
-    await prisma.researchJob.update({
-      where: { id: input.jobId },
-      data: { completedAt: new Date() },
-    });
+    await updateResearchJob(input.jobId, {completedAt: new Date().toISOString()});
 
     await emitEvent(input.jobId, {
       type: "job.completed",
@@ -493,11 +409,7 @@ export async function runResearch(input: RunResearchInput): Promise<void> {
     });
   } catch (error) {
     const appError = error instanceof AppError ? error : new AppError("unknown", String(error));
-    await prisma.researchJob
-      .update({
-        where: { id: input.jobId },
-        data: { status: "failed", stage: "failed", errorMessage: appError.message },
-      })
+    await updateResearchJob(input.jobId, {status: "failed", stage: "failed", errorMessage: appError.message})
       .catch(() => undefined);
     await emitEvent(input.jobId, {
       type: "job.failed",

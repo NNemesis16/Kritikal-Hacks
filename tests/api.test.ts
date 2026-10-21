@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { closeDatabase } from "@/lib/db";
 
-import { prisma } from "@/lib/db";
 
 import { POST as startResearch } from "@/app/api/research/route";
 import { GET as getResearch } from "@/app/api/research/[jobId]/route";
@@ -63,7 +63,7 @@ describe("research pipeline (demo mode)", () => {
   });
 
   afterAll(async () => {
-    await prisma.$disconnect();
+    await closeDatabase();
   });
 
   it("completes the run and records the number of records found", async () => {

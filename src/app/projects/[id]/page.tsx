@@ -4,9 +4,13 @@ import { notFound } from "next/navigation";
 
 import { Tag, Card, CardBody, CardHeader, Stat } from "@/components/ui";
 import { SaveProjectButton } from "@/components/toggle-buttons";
-import { prisma } from "@/lib/db";
 import { parseJson } from "@/lib/json";
 import { formatDate, hostFromUrl } from "@/lib/utils";
+import {
+  getProjectWithRelations,
+  listSourceReferences,
+} from "@/lib/repo";
+
 
 export const metadata: Metadata = {
   title: "Project detail",
@@ -17,21 +21,13 @@ export const dynamic = "force-dynamic";
 export default async function ProjectDetailPage({ params }: PageProps<"/projects/[id]">) {
   const { id } = await params;
 
-  const project = await prisma.project.findUnique({
-    where: { id },
-    include: {
-      results: { include: { job: { select: { id: true, topic: true } } } },
-      savedBy: true,
-    },
-  });
+  const relation = await getProjectWithRelations(id);
 
-  if (!project) notFound();
+  if (!relation) notFound();
 
-  const jobIds = project.results.map((result) => result.jobId);
-  const sources = await prisma.sourceReference.findMany({
-    where: { jobId: { in: jobIds } },
-    orderBy: { retrievedAt: "desc" },
-  });
+  const project = relation.project;
+  const jobIds = relation.results.map((result) => result.jobId);
+  const sources = await listSourceReferences(jobIds);
 
   const technologies = parseJson<string[]>(project.technologies, []);
   const uncertainty = parseJson<string[]>(project.uncertaintyNotes, []);
@@ -67,7 +63,7 @@ export default async function ProjectDetailPage({ params }: PageProps<"/projects
             <Tag tone="paper">{project.platform}</Tag>
             {project.domain ? <Tag tone="paper">{project.domain}</Tag> : null}
             {project.clusterId ? <Tag tone="sky">cluster: {project.clusterId}</Tag> : null}
-            {project.savedBy.length > 0 ? <Tag tone="mint">saved</Tag> : null}
+            {relation.savedBy.length > 0 ? <Tag tone="mint">saved</Tag> : null}
           </div>
           <h1 className="mt-3 text-3xl font-bold tracking-tight text-ink">
             {project.title}
@@ -85,7 +81,7 @@ export default async function ProjectDetailPage({ params }: PageProps<"/projects
           </a>
           <SaveProjectButton
             projectId={project.id}
-            initialSaved={project.savedBy.length > 0}
+            initialSaved={relation.savedBy.length > 0}
           />
         </div>
       </div>
@@ -93,7 +89,7 @@ export default async function ProjectDetailPage({ params }: PageProps<"/projects
       <div className="mt-8 grid gap-3 sm:grid-cols-3">
         <Stat
           label="Relevance"
-          value={`${Math.round((project.results[0]?.relevance ?? 0) * 100)}%`}
+          value={`${Math.round((relation.results[0]?.relevance ?? 0) * 100)}%`}
           hint="Keyword overlap with your query"
         />
         <Stat label="Retrieved" value={formatDate(project.retrievedAt)} />
@@ -241,18 +237,18 @@ export default async function ProjectDetailPage({ params }: PageProps<"/projects
           </CardBody>
         </Card>
 
-        {project.results.length > 0 ? (
+        {relation.results.length > 0 ? (
           <Card>
             <CardHeader title="Appears in" />
             <CardBody>
               <ul className="space-y-2 text-sm">
-                {project.results.map((result) => (
-                  <li key={result.job.id}>
+                {relation.results.map((result) => (
+                  <li key={result.jobId}>
                     <Link
-                      href={`/research/${result.job.id}`}
+                      href={`/research/${result.jobId}`}
                       className="font-medium text-punch hover:underline"
                     >
-                      {result.job.topic}
+                      {result.job?.topic ?? "Research run"}
                     </Link>
                   </li>
                 ))}

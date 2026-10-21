@@ -4,9 +4,12 @@ import { notFound } from "next/navigation";
 
 import { LiveResearch, type LiveEvent, type LiveJob } from "@/components/live-research";
 import { ManualImport } from "@/components/manual-import";
-import { prisma } from "@/lib/db";
 import { parseJson } from "@/lib/json";
 import { sourceCheckSchema } from "@/lib/schema";
+import {
+  getResearchJobWithEvents,
+} from "@/lib/repo";
+
 
 export const metadata: Metadata = {
   title: "Live research",
@@ -17,14 +20,11 @@ export const dynamic = "force-dynamic";
 export default async function ResearchRunPage({ params }: PageProps<"/research/[jobId]">) {
   const { jobId } = await params;
 
-  const job = await prisma.researchJob.findUnique({
-    where: { id: jobId },
-    include: {
-      events: { orderBy: { createdAt: "asc" } },
-    },
-  });
+  const bundle = await getResearchJobWithEvents(jobId);
 
-  if (!job) notFound();
+  if (!bundle) notFound();
+
+  const job = bundle.job;
 
   const liveJob: LiveJob = {
     id: job.id,
@@ -41,14 +41,14 @@ export default async function ResearchRunPage({ params }: PageProps<"/research/[
     sourcesChecked: parseJson(job.sourcesChecked, [], sourceCheckSchema.array()),
   };
 
-  const liveEvents: LiveEvent[] = job.events.map((event) => ({
+  const liveEvents: LiveEvent[] = bundle.events.map((event) => ({
     id: event.id,
     type: event.type,
     stage: event.stage,
     message: event.message,
     level: event.level as LiveEvent["level"],
     payload: event.payload,
-    createdAt: event.createdAt.toISOString(),
+    createdAt: event.createdAt,
   }));
 
   return (

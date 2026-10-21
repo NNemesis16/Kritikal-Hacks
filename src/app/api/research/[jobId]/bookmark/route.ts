@@ -1,5 +1,9 @@
-import { prisma } from "@/lib/db";
 import { jsonError } from "@/lib/api";
+import {
+  getResearchJob,
+  updateResearchJob,
+} from "@/lib/repo";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,10 +17,7 @@ export async function POST(request: Request, context: { params: Promise<{ jobId:
   try {
     const { jobId } = await context.params;
 
-    const job = await prisma.researchJob.findUnique({
-      where: { id: jobId },
-      select: { id: true, isBookmarked: true },
-    });
+    const job = await getResearchJob(jobId);
     if (!job) {
       return Response.json(
         { error: { code: "not_found", message: "That research job does not exist." } },
@@ -32,10 +33,7 @@ export async function POST(request: Request, context: { params: Promise<{ jobId:
       // An empty body means "toggle" -> save.
     }
 
-    await prisma.researchJob.update({
-      where: { id: jobId },
-      data: { isBookmarked: saved },
-    });
+    await updateResearchJob(jobId, {isBookmarked: saved});
 
     return Response.json({ jobId, saved });
   } catch (error) {

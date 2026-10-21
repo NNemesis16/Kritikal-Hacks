@@ -18,7 +18,6 @@ import "server-only";
  * The user's interests, technologies, team capabilities and constraints are
  * optional preferences — the flow works with all of them blank.
  */
-import { prisma } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { isDemoMode } from "@/lib/env";
 import { parseJson, stringifyJson } from "@/lib/json";
@@ -47,6 +46,14 @@ import {
   DEMO_PROPOSAL,
   DEMO_RECORDS,
 } from "@/lib/research/demo";
+import {
+  createProposal,
+  getIdeaDiscoveryWithRelations,
+  listResearchResults,
+  updateIdeaDiscovery,
+  updateResearchJob,
+} from "@/lib/repo";
+
 
 export interface DiscoveryInput {
   discoveryId: string;
@@ -128,10 +135,7 @@ export function buildDiscoveryQueryPlan(sourceIds: SourceId[]): QueryPlan[] {
 }
 
 async function setStage(discoveryId: string, stage: string, status = "running") {
-  await prisma.ideaDiscovery.update({
-    where: { id: discoveryId },
-    data: { stage, status },
-  });
+  await updateIdeaDiscovery(discoveryId, {stage, status});
 }
 
 /* -------------------------------------------------------------------------- */
@@ -193,21 +197,14 @@ async function runDemo(context: CollectionContext, input: DiscoveryInput) {
   const recommendation =
     concepts.find((concept) => concept.id === DEMO_DISCOVERY_RECOMMENDATION.conceptId) ?? concepts[0];
 
-  await prisma.ideaDiscovery.update({
-    where: { id: input.discoveryId },
-    data: {
-      analysis: stringifyJson({
+  await updateIdeaDiscovery(input.discoveryId, {analysis: stringifyJson({
         ...DEMO_DISCOVERY_ANALYSIS,
         commonGround: DEMO_DISCOVERY_COMMON_GROUND,
         unvalidated: DEMO_DISCOVERY_UNVALIDATED,
-      }),
-      concepts: stringifyJson(concepts),
-      recommendation: stringifyJson({
+      }), concepts: stringifyJson(concepts), recommendation: stringifyJson({
         ...DEMO_DISCOVERY_RECOMMENDATION,
         conceptId: recommendation.id,
-      }),
-    },
-  });
+      })});
 
   await setStage(input.discoveryId, "designing");
   await emitEvent(input.jobId, {
@@ -219,10 +216,7 @@ async function runDemo(context: CollectionContext, input: DiscoveryInput) {
   });
 
   await setStage(input.discoveryId, "done", "completed");
-  await prisma.researchJob.update({
-    where: { id: input.jobId },
-    data: { completedAt: new Date(), resultCount: records.length },
-  });
+  await updateResearchJob(input.jobId, {completedAt: new Date().toISOString(), resultCount: records.length});
 
   await emitEvent(input.jobId, {
     type: "job.completed",
@@ -288,14 +282,7 @@ export async function runDiscovery(input: DiscoveryInput): Promise<void> {
           "No results were returned by the sources that were checked, so no problem could be identified. Try another source or a live run.",
       });
       await setStage(input.discoveryId, "done", "completed");
-      await prisma.researchJob.update({
-        where: { id: input.jobId },
-        data: {
-          completedAt: new Date(),
-          resultCount: 0,
-          sourcesChecked: stringifyJson([...checks.values()]),
-        },
-      });
+      await updateResearchJob(input.jobId, {completedAt: new Date().toISOString(), resultCount: 0, sourcesChecked: stringifyJson([...checks.values()])});
       return;
     }
 
@@ -350,10 +337,7 @@ export async function runDiscovery(input: DiscoveryInput): Promise<void> {
       }
     }
 
-    await prisma.ideaDiscovery.update({
-      where: { id: input.discoveryId },
-      data: { analysis: stringifyJson({ ...analysis, sources: mergedSources }) },
-    });
+    await updateIdeaDiscovery(input.discoveryId, {analysis: stringifyJson({ ...analysis, sources: mergedSources })});
 
     await emitEvent(input.jobId, {
       type: "analysis.done",
@@ -409,13 +393,7 @@ export async function runDiscovery(input: DiscoveryInput): Promise<void> {
     const ranked = [...result.concepts].sort((a, b) => b.totalScore - a.totalScore);
     const best = ranked.find((concept) => concept.id === result.recommendedId) ?? ranked[0];
 
-    await prisma.ideaDiscovery.update({
-      where: { id: input.discoveryId },
-      data: {
-        concepts: stringifyJson(ranked),
-        recommendation: stringifyJson({ ...result.recommendation, conceptId: best?.id ?? "" }),
-      },
-    });
+    await updateIdeaDiscovery(input.discoveryId, {concepts: stringifyJson(ranked), recommendation: stringifyJson({ ...result.recommendation, conceptId: best?.id ?? "" })});
 
     await emitEvent(input.jobId, {
       type: "concepts.done",
@@ -426,10 +404,7 @@ export async function runDiscovery(input: DiscoveryInput): Promise<void> {
     });
 
     await setStage(input.discoveryId, "done", "completed");
-    await prisma.researchJob.update({
-      where: { id: input.jobId },
-      data: { completedAt: new Date() },
-    });
+    await updateResearchJob(input.jobId, {completedAt: new Date().toISOString()});
 
     await emitEvent(input.jobId, {
       type: "job.completed",
@@ -440,11 +415,7 @@ export async function runDiscovery(input: DiscoveryInput): Promise<void> {
     });
   } catch (error) {
     const appError = error instanceof AppError ? error : new AppError("unknown", String(error));
-    await prisma.ideaDiscovery
-      .update({
-        where: { id: input.discoveryId },
-        data: { status: "failed", stage: "failed", errorMessage: appError.message },
-      })
+    await updateIdeaDiscovery(input.discoveryId, {status: "failed", stage: "failed", errorMessage: appError.message})
       .catch(() => undefined);
     await emitEvent(input.jobId, {
       type: "job.failed",
@@ -465,10 +436,7 @@ export async function buildProposalForConcept(
   conceptId: string,
   userNotes: string,
 ): Promise<{ id: string; title: string; content: unknown; isDemo: boolean }> {
-  const discovery = await prisma.ideaDiscovery.findUnique({
-    where: { id: discoveryId },
-    include: { job: { include: { results: { orderBy: { rank: "asc" }, include: { project: true } } } } },
-  });
+  const discovery = await getIdeaDiscoveryWithRelations(discoveryId);
 
   if (!discovery) {
     throw new AppError("not_found", "That discovery run does not exist.");
@@ -481,27 +449,22 @@ export async function buildProposalForConcept(
   }
 
   const analysis = parseJson(discovery.analysis, {} as Record<string, unknown>);
-  const existingProjects = discovery.job.results.map((result) => ({
-    title: result.project.title,
-    platform: result.project.platform,
-    url: result.project.sourceUrl,
-    summary: result.project.summary,
-    problemAddressed: result.project.problemAddressed ?? "",
-    proposedSolution: result.project.proposedSolution ?? "",
-    targetUsers: result.project.targetUsers ?? "",
-    technologies: parseJson<string[]>(result.project.technologies, []),
-  }));
+  const jobResults = await listResearchResults(discovery.jobId);
+  const existingProjects = jobResults
+    .filter((result) => result.project)
+    .map((result) => ({
+      title: result.project?.title ?? "",
+      platform: result.project?.platform ?? "",
+      url: result.project?.sourceUrl ?? "",
+      summary: result.project?.summary ?? "",
+      problemAddressed: result.project?.problemAddressed ?? "",
+      proposedSolution: result.project?.proposedSolution ?? "",
+      targetUsers: result.project?.targetUsers ?? "",
+      technologies: parseJson<string[]>(result.project?.technologies ?? "[]", []),
+    }));
 
   if (isDemoMode() || discovery.isDemo) {
-    const proposal = await prisma.proposal.create({
-      data: {
-        discoveryId,
-        conceptId: concept.id,
-        title: DEMO_PROPOSAL.title,
-        content: stringifyJson(DEMO_PROPOSAL),
-        isDemo: true,
-      },
-    });
+    const proposal = await createProposal({discoveryId, conceptId: concept.id, title: DEMO_PROPOSAL.title, content: stringifyJson(DEMO_PROPOSAL), isDemo: true});
     return {
       id: proposal.id,
       title: proposal.title,
@@ -521,15 +484,7 @@ export async function buildProposalForConcept(
     constraints: discovery.constraints,
   });
 
-  const proposal = await prisma.proposal.create({
-    data: {
-      discoveryId,
-      conceptId: concept.id,
-      title: content.title,
-      content: stringifyJson(content),
-      isDemo: false,
-    },
-  });
+  const proposal = await createProposal({discoveryId, conceptId: concept.id, title: content.title, content: stringifyJson(content), isDemo: false});
 
   return { id: proposal.id, title: proposal.title, content, isDemo: false };
 }

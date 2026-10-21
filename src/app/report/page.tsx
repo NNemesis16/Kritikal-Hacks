@@ -5,7 +5,6 @@ import { ExportButtons } from "@/components/export-buttons";
 import { GenerateButton } from "@/components/generate-button";
 import { JobSelect } from "@/components/job-select";
 import { Alert, Tag, Card, CardBody, CardHeader, EmptyState, Stat } from "@/components/ui";
-import { prisma } from "@/lib/db";
 import { parseJson } from "@/lib/json";
 import {
   marketGapSchema,
@@ -14,6 +13,11 @@ import {
   type SourceLink,
 } from "@/lib/schema";
 import { cn } from "@/lib/utils";
+import {
+  getResearchJobWithReport,
+  listResearchJobs,
+} from "@/lib/repo";
+
 
 export const metadata: Metadata = {
   title: "Market-gap report",
@@ -31,21 +35,10 @@ export default async function ReportPage({ searchParams }: PageProps<"/report">)
   const params = await searchParams;
   const jobId = typeof params.jobId === "string" ? params.jobId : "";
 
-  const jobs = await prisma.researchJob.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 20,
-    select: { id: true, topic: true, isDemo: true },
-  });
+  const jobs = await listResearchJobs({ limit: 20, bookmarkedOnly: false });
 
-  const job = jobId
-    ? await prisma.researchJob.findUnique({
-        where: { id: jobId },
-        include: {
-          report: true,
-          results: { include: { project: true } },
-          experiments: { orderBy: { createdAt: "asc" } },
-        },
-      })
+  const bundle = jobId
+    ? await getResearchJobWithReport(jobId)
     : null;
 
   if (!jobId) {
@@ -75,7 +68,7 @@ export default async function ReportPage({ searchParams }: PageProps<"/report">)
     );
   }
 
-  if (!job) {
+  if (!bundle) {
     return (
       <div className="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6 lg:px-8">
         <EmptyState
@@ -86,7 +79,8 @@ export default async function ReportPage({ searchParams }: PageProps<"/report">)
     );
   }
 
-  const report = job.report;
+  const job = bundle.job;
+  const report = bundle.report;
   const gaps = parseJson(report?.gaps, [], marketGapSchema.array());
   const patterns = parseJson<RepeatedPattern[]>(report?.patterns, []);
   const competitors = parseJson<CompetitorProfile[]>(report?.competitors, []);
@@ -481,10 +475,10 @@ export default async function ReportPage({ searchParams }: PageProps<"/report">)
               hypothesis and a finding.
             </p>
             <div className="mt-4 space-y-3">
-              {job.experiments.length === 0 ? (
+              {bundle.experiments.length === 0 ? (
                 <EmptyState title="No experiments proposed yet" />
               ) : (
-                job.experiments.map((experiment) => (
+                bundle.experiments.map((experiment) => (
                   <Card key={experiment.id}>
                     <CardBody>
                       <div className="flex flex-wrap items-start justify-between gap-3">

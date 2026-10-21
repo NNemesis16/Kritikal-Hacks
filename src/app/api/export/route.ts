@@ -1,7 +1,11 @@
 import { jsonError, parseJsonBody } from "@/lib/api";
-import { prisma } from "@/lib/db";
 import { buildJsonExport, buildMarkdownReport } from "@/lib/research/export";
 import { exportRequestSchema } from "@/lib/schema";
+import {
+  getResearchJob,
+  createSavedReport,
+} from "@/lib/repo";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,10 +21,7 @@ export async function POST(request: Request) {
   try {
     const body = await parseJsonBody(request, exportRequestSchema);
 
-    const job = await prisma.researchJob.findUnique({
-      where: { id: body.jobId },
-      select: { id: true, topic: true },
-    });
+    const job = await getResearchJob(body.jobId);
     if (!job) {
       return Response.json(
         { error: { code: "not_found", message: "That research job does not exist." } },
@@ -36,9 +37,7 @@ export async function POST(request: Request) {
 
     if (body.format === "json") {
       const payload = await buildJsonExport(body.jobId);
-      await prisma.savedReport.create({
-        data: { jobId: body.jobId, title: `${job.topic} (JSON export)`, format: "json" },
-      });
+      await createSavedReport({jobId: body.jobId, title: `${job.topic} (JSON export)`, format: "json"});
       return Response.json(payload, {
         headers: {
           "Content-Disposition": `attachment; filename="projectscope-${slug || "report"}.json"`,
@@ -47,9 +46,7 @@ export async function POST(request: Request) {
     }
 
     const markdown = await buildMarkdownReport(body.jobId);
-    await prisma.savedReport.create({
-      data: { jobId: body.jobId, title: `${job.topic} (report)`, format: "markdown" },
-    });
+    await createSavedReport({jobId: body.jobId, title: `${job.topic} (report)`, format: "markdown"});
 
     return new Response(markdown, {
       status: 200,

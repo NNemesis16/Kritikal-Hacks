@@ -9,7 +9,6 @@ import "server-only";
  */
 import { z } from "zod";
 
-import { prisma } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { isDemoMode } from "@/lib/env";
 import { parseJson, stringifyJson } from "@/lib/json";
@@ -25,24 +24,34 @@ import { compareProjects, generateConcepts, reviewPitch } from "@/lib/providers/
 import { generateMarketGapReport, type EvidenceItem } from "@/lib/providers/gemini";
 
 import { DEMO_REPORT } from "@/lib/research/demo";
+import {
+  createProposedConcept,
+  createValidationExperiment,
+  deleteProposedConcepts,
+  deleteValidationExperiments,
+  findProposedConcept,
+  getMarketGapReport,
+  getPitch,
+  getResearchJobWithResults,
+  listProposedConcepts,
+  listValidationExperiments,
+  upsertMarketGapReport,
+  upsertPitch,
+} from "@/lib/repo";
+
 
 /** Load a job plus its projects, newest rank first. */
 export async function loadJobWithProjects(jobId: string) {
-  const job = await prisma.researchJob.findUnique({
-    where: { id: jobId },
-    include: {
-      results: {
-        orderBy: { rank: "asc" },
-        include: { project: true },
-      },
-    },
-  });
+  const bundle = await getResearchJobWithResults(jobId);
 
-  if (!job) {
+  if (!bundle) {
     throw new AppError("not_found", "That research job does not exist.");
   }
 
-  return job;
+  return {
+    ...bundle.job,
+    results: bundle.results,
+  };
 }
 
 export function projectToEvidence(project: {
@@ -77,34 +86,13 @@ export async function runAnalysis(jobId: string, focus: string): Promise<MarketG
 
   if (isDemoMode()) {
     const report = DEMO_REPORT as unknown as MarketGapReport;
-    await prisma.marketGapReport.upsert({
-      where: { jobId },
-      create: {
-        jobId,
-        summary: report.summary,
-        gaps: stringifyJson(report.gaps),
-        patterns: stringifyJson(report.patterns),
-        competitors: stringifyJson(report.competitors),
-        assumptions: stringifyJson(report.assumptions),
-        experiments: stringifyJson(report.experiments),
-        sources: stringifyJson(report.sources),
-        isDemo: true,
-      },
-      update: {
-        summary: report.summary,
-        gaps: stringifyJson(report.gaps),
-        patterns: stringifyJson(report.patterns),
-        competitors: stringifyJson(report.competitors),
-        assumptions: stringifyJson(report.assumptions),
-        experiments: stringifyJson(report.experiments),
-        sources: stringifyJson(report.sources),
-        isDemo: true,
-      },
-    });
+    await upsertMarketGapReport(jobId, {summary: report.summary, gaps: stringifyJson(report.gaps), patterns: stringifyJson(report.patterns), competitors: stringifyJson(report.competitors), assumptions: stringifyJson(report.assumptions), experiments: stringifyJson(report.experiments), sources: stringifyJson(report.sources), isDemo: true});
     return report;
   }
 
-  const evidence = job.results.map((result) => projectToEvidence(result.project));
+  const evidence = job.results
+    .map((result) => (result.project ? projectToEvidence(result.project) : null))
+    .filter((item): item is EvidenceItem => item !== null);
   if (evidence.length === 0) {
     throw new AppError(
       "validation_error",
@@ -130,46 +118,12 @@ export async function runAnalysis(jobId: string, focus: string): Promise<MarketG
     }
   }
 
-  await prisma.marketGapReport.upsert({
-    where: { jobId },
-    create: {
-      jobId,
-      summary: report.summary,
-      gaps: stringifyJson(report.gaps),
-      patterns: stringifyJson(report.patterns),
-      competitors: stringifyJson(report.competitors),
-      assumptions: stringifyJson(report.assumptions),
-      experiments: stringifyJson(report.experiments),
-      sources: stringifyJson(mergedSources),
-      isDemo: false,
-    },
-    update: {
-      summary: report.summary,
-      gaps: stringifyJson(report.gaps),
-      patterns: stringifyJson(report.patterns),
-      competitors: stringifyJson(report.competitors),
-      assumptions: stringifyJson(report.assumptions),
-      experiments: stringifyJson(report.experiments),
-      sources: stringifyJson(mergedSources),
-    },
-  });
+  await upsertMarketGapReport(jobId, {summary: report.summary, gaps: stringifyJson(report.gaps), patterns: stringifyJson(report.patterns), competitors: stringifyJson(report.competitors), assumptions: stringifyJson(report.assumptions), experiments: stringifyJson(report.experiments), sources: stringifyJson(mergedSources), isDemo: false});
 
   // Replace the experiment set so a re-run does not duplicate rows.
-  await prisma.validationExperiment.deleteMany({ where: { jobId } });
+  await deleteValidationExperiments(jobId);
   for (const experiment of report.experiments) {
-    await prisma.validationExperiment.create({
-      data: {
-        jobId,
-        title: experiment.title,
-        hypothesis: experiment.hypothesis,
-        method: experiment.method,
-        metric: experiment.metric,
-        successCriteria: experiment.successCriteria,
-        duration: experiment.duration,
-        cost: experiment.cost,
-        relatedGapId: experiment.relatedGapId || null,
-      },
-    });
+    await createValidationExperiment({jobId, title: experiment.title, hypothesis: experiment.hypothesis, method: experiment.method, metric: experiment.metric, successCriteria: experiment.successCriteria, duration: experiment.duration, cost: experiment.cost, relatedGapId: experiment.relatedGapId || null});
   }
 
   void usedSearchGrounding;
@@ -177,7 +131,7 @@ export async function runAnalysis(jobId: string, focus: string): Promise<MarketG
 }
 
 export async function readAnalysis(jobId: string) {
-  const report = await prisma.marketGapReport.findUnique({ where: { jobId } });
+  const report = await getMarketGapReport(jobId);
   if (!report) return null;
 
   return {
@@ -191,8 +145,8 @@ export async function readAnalysis(jobId: string) {
     experiments: parseJson(report.experiments, [], z.array(experimentSchema)),
     sources: parseJson(report.sources, []),
     isDemo: report.isDemo,
-    createdAt: report.createdAt.toISOString(),
-    updatedAt: report.updatedAt.toISOString(),
+    createdAt: report.createdAt,
+    updatedAt: report.updatedAt,
   };
 }
 
@@ -202,7 +156,7 @@ export async function readAnalysis(jobId: string) {
 
 export async function runConcepts(jobId: string, constraints: string, count: number) {
   const job = await loadJobWithProjects(jobId);
-  const report = await prisma.marketGapReport.findUnique({ where: { jobId } });
+  const report = await getMarketGapReport(jobId);
   const gaps = parseJson(report?.gaps, [], z.array(marketGapSchema));
 
   if (isDemoMode()) {
@@ -264,46 +218,32 @@ export async function runConcepts(jobId: string, constraints: string, count: num
     ]
       .filter(Boolean)
       .join("\n"),
-    existingProjects: job.results.slice(0, 25).map((result) => ({
-      title: result.project.title,
-      platform: result.project.platform,
-      url: result.project.sourceUrl,
-      summary: result.project.summary,
-      problemAddressed: result.project.problemAddressed ?? "",
-      proposedSolution: result.project.proposedSolution ?? "",
-      targetUsers: result.project.targetUsers ?? "",
-      technologies: parseJson<string[]>(result.project.technologies, []),
-    })),
+    existingProjects: job.results
+      .filter((result) => result.project)
+      .slice(0, 25)
+      .map((result) => ({
+        title: result.project?.title ?? "",
+        platform: result.project?.platform ?? "",
+        url: result.project?.sourceUrl ?? "",
+        summary: result.project?.summary ?? "",
+        problemAddressed: result.project?.problemAddressed ?? "",
+        proposedSolution: result.project?.proposedSolution ?? "",
+        targetUsers: result.project?.targetUsers ?? "",
+        technologies: parseJson<string[]>(result.project?.technologies ?? "[]", []),
+      })),
     gaps: gaps.map((gap) => ({ id: gap.id, title: gap.title, observation: gap.observation })),
   });
 
-  await prisma.proposedConcept.deleteMany({ where: { jobId } });
+  await deleteProposedConcepts(jobId);
   for (const concept of result.concepts) {
-    await prisma.proposedConcept.create({
-      data: {
-        jobId,
-        title: concept.title,
-        tagline: concept.tagline,
-        problem: concept.problem,
-        targetUsers: concept.targetUsers,
-        solution: concept.solution,
-        differentiators: stringifyJson(concept.differentiators),
-        comparisons: stringifyJson(concept.comparisons),
-        risks: stringifyJson(concept.risks),
-        validationPlan: concept.validationPlan,
-        similarityWarning: concept.similarityWarning || null,
-      },
-    });
+    await createProposedConcept({jobId, title: concept.title, tagline: concept.tagline, problem: concept.problem, targetUsers: concept.targetUsers, solution: concept.solution, differentiators: stringifyJson(concept.differentiators), comparisons: stringifyJson(concept.comparisons), risks: stringifyJson(concept.risks), validationPlan: concept.validationPlan, similarityWarning: concept.similarityWarning || null});
   }
 
   return result;
 }
 
 export async function readConcepts(jobId: string) {
-  const rows = await prisma.proposedConcept.findMany({
-    where: { jobId },
-    orderBy: { createdAt: "asc" },
-  });
+  const rows = await listProposedConcepts(jobId);
 
   return rows.map((row) => ({
     id: row.id,
@@ -317,7 +257,7 @@ export async function readConcepts(jobId: string) {
     risks: parseJson<string[]>(row.risks, []),
     validationPlan: row.validationPlan,
     similarityWarning: row.similarityWarning,
-    createdAt: row.createdAt.toISOString(),
+    createdAt: row.createdAt,
   }));
 }
 
@@ -328,10 +268,10 @@ export async function readConcepts(jobId: string) {
 export async function runPitch(jobId: string, conceptId: string, extra: string): Promise<PitchContent> {
   const job = await loadJobWithProjects(jobId);
   const concept = conceptId
-    ? await prisma.proposedConcept.findFirst({ where: { id: conceptId, jobId } })
-    : await prisma.proposedConcept.findFirst({ where: { jobId }, orderBy: { createdAt: "asc" } });
-  const experiments = await prisma.validationExperiment.findMany({ where: { jobId } });
-  const report = await prisma.marketGapReport.findUnique({ where: { jobId } });
+    ? await findProposedConcept(conceptId, jobId)
+    : (await listProposedConcepts(jobId))[0] ?? null;
+  const experiments = await listValidationExperiments(jobId);
+  const report = await getMarketGapReport(jobId);
   const gaps = parseJson(report?.gaps, [], z.array(marketGapSchema));
 
   if (isDemoMode()) {
@@ -358,18 +298,14 @@ export async function runPitch(jobId: string, conceptId: string, extra: string):
         "What did you actually test, and what happened?",
         "Why would someone switch to your solution rather than the alternatives you researched?",
       ],
-      attribution: job.results.map((result) => result.project.attribution),
+      attribution: job.results.map((result) => result.project?.attribution ?? ""),
       honestyNotes: [
         "This pitch was generated in demo mode without a live model.",
         "Replace every placeholder with your real implementation, tests and results before presenting.",
       ],
     };
 
-    await prisma.pitch.upsert({
-      where: { jobId },
-      create: { jobId, content: stringifyJson(content), clarityScore: null, clarityNotes: stringifyJson([]), isDemo: true },
-      update: { content: stringifyJson(content), clarityNotes: stringifyJson([]), isDemo: true },
-    });
+    await upsertPitch(jobId, {content: stringifyJson(content), clarityScore: null, clarityNotes: stringifyJson([]), isDemo: true});
 
     return content;
   }
@@ -394,12 +330,15 @@ export async function runPitch(jobId: string, conceptId: string, extra: string):
           targetUsers: concept.targetUsers,
         }
       : null,
-    existingProjects: job.results.slice(0, 20).map((result) => ({
-      title: result.project.title,
-      platform: result.project.platform,
-      url: result.project.sourceUrl,
-      summary: result.project.summary,
-    })),
+    existingProjects: job.results
+      .filter((result) => result.project)
+      .slice(0, 20)
+      .map((result) => ({
+        title: result.project?.title ?? "",
+        platform: result.project?.platform ?? "",
+        url: result.project?.sourceUrl ?? "",
+        summary: result.project?.summary ?? "",
+      })),
     experiments: experiments.map((experiment) => ({
       title: experiment.title,
       hypothesis: experiment.hypothesis,
@@ -413,27 +352,13 @@ export async function runPitch(jobId: string, conceptId: string, extra: string):
     })),
   });
 
-  await prisma.pitch.upsert({
-    where: { jobId },
-    create: {
-      jobId,
-      content: stringifyJson(review.content),
-      clarityScore: review.clarityScore,
-      clarityNotes: stringifyJson(review.clarityNotes),
-      isDemo: false,
-    },
-    update: {
-      content: stringifyJson(review.content),
-      clarityScore: review.clarityScore,
-      clarityNotes: stringifyJson(review.clarityNotes),
-    },
-  });
+  await upsertPitch(jobId, {content: stringifyJson(review.content), clarityScore: review.clarityScore, clarityNotes: stringifyJson(review.clarityNotes), isDemo: false});
 
   return review.content;
 }
 
 export async function readPitch(jobId: string) {
-  const pitch = await prisma.pitch.findUnique({ where: { jobId } });
+  const pitch = await getPitch(jobId);
   if (!pitch) return null;
   return {
     id: pitch.id,
@@ -442,7 +367,7 @@ export async function readPitch(jobId: string) {
     clarityScore: pitch.clarityScore,
     clarityNotes: parseJson<string[]>(pitch.clarityNotes, []),
     isDemo: pitch.isDemo,
-    updatedAt: pitch.updatedAt.toISOString(),
+    updatedAt: pitch.updatedAt,
   };
 }
 
@@ -453,8 +378,9 @@ export async function readPitch(jobId: string) {
 export async function runComparison(jobId: string, projectIds: string[]) {
   const job = await loadJobWithProjects(jobId);
   const chosen = job.results
-    .filter((result) => projectIds.includes(result.projectId))
-    .map((result) => result.project);
+    .filter((result) => projectIds.includes(result.projectId) && result.project)
+    .map((result) => result.project!)
+    .filter((project): project is NonNullable<typeof project> => Boolean(project));
 
   if (chosen.length < 2) {
     throw new AppError("validation_error", "Select at least two projects to compare.");

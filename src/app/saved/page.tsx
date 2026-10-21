@@ -3,9 +3,14 @@ import Link from "next/link";
 
 import { BookmarkButton } from "@/components/toggle-buttons";
 import { Tag, Card, CardBody, CardHeader, EmptyState, Stat } from "@/components/ui";
-import { prisma } from "@/lib/db";
 import { parseJson } from "@/lib/json";
 import { formatDate } from "@/lib/utils";
+import {
+  listResearchJobs,
+  listSavedProjects,
+  listSavedReports,
+} from "@/lib/repo";
+
 
 export const metadata: Metadata = {
   title: "Saved research",
@@ -15,31 +20,9 @@ export const dynamic = "force-dynamic";
 
 export default async function SavedPage() {
   const [jobs, savedProjects, savedReports] = await Promise.all([
-    prisma.researchJob.findMany({
-      orderBy: [{ isBookmarked: "desc" }, { createdAt: "desc" }],
-      take: 50,
-      select: {
-        id: true,
-        topic: true,
-        status: true,
-        stage: true,
-        isDemo: true,
-        resultCount: true,
-        isBookmarked: true,
-        createdAt: true,
-        sources: true,
-      },
-    }),
-    prisma.savedProject.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 50,
-      include: { project: true },
-    }),
-    prisma.savedReport.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 50,
-      include: { job: { select: { id: true, topic: true } } },
-    }),
+    listResearchJobs({ limit: 50, bookmarkedFirst: true }),
+    listSavedProjects(),
+    listSavedReports(),
   ]);
 
   const bookmarked = jobs.filter((job) => job.isBookmarked);
@@ -169,12 +152,12 @@ export default async function SavedPage() {
                         href={`/projects/${saved.projectId}`}
                         className="text-sm font-semibold text-ink hover:text-punch"
                       >
-                        {saved.project.title}
+                        {saved.project?.title ?? "Saved project"}
                       </Link>
-                      <Tag tone="paper">{saved.project.platform}</Tag>
+                      <Tag tone="paper">{saved.project?.platform ?? "Unknown"}</Tag>
                     </div>
                     <p className="mt-1 line-clamp-2 text-sm text-ink/60">
-                      {saved.project.summary}
+                      {saved.project?.summary ?? ""}
                     </p>
                     {saved.note ? (
                       <p className="mt-1 text-xs text-ink/60">Note: {saved.note}</p>

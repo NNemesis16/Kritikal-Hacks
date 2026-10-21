@@ -3,9 +3,12 @@ import Link from "next/link";
 
 import { ProjectCard } from "@/components/project-card";
 import { Tag, Card, CardBody, EmptyState, Input, Stat } from "@/components/ui";
-import { prisma } from "@/lib/db";
 import { queryProjects, type ProjectFacets } from "@/lib/projects";
 import { cn } from "@/lib/utils";
+import {
+  listResearchJobs,
+} from "@/lib/repo";
+
 
 export const metadata: Metadata = {
   title: "Project explorer",
@@ -98,11 +101,7 @@ export default async function ProjectsPage({ searchParams }: PageProps<"/project
   const result = await queryProjects(filters);
   const facets: ProjectFacets = result.facets;
 
-  const jobs = await prisma.researchJob.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 20,
-    select: { id: true, topic: true, isDemo: true },
-  });
+  const jobs = await listResearchJobs({ limit: 20, bookmarkedOnly: false });
 
   const awardOptions = [
     { value: "verified", count: facets.awards.verified },

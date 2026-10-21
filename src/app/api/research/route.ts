@@ -1,12 +1,25 @@
-import { prisma } from "@/lib/db";
 import { jsonError, parseJsonBody } from "@/lib/api";
 import { getEnv, getProviderStatus, isDemoMode } from "@/lib/env";
 import { stringifyJson } from "@/lib/json";
 import { researchRequestSchema } from "@/lib/schema";
 import { runResearch } from "@/lib/research/pipeline";
+import {
+  createResearchJob,
+  listResearchJobs,
+} from "@/lib/repo";
+import { runInBackground } from "@/lib/background";
+
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * How long this function may run. Vercel clamps this to your plan's limit
+ * (60s on Hobby, 300s on Pro). A research run calls three external APIs, so
+ * it needs more than the default.
+ */
+export const maxDuration = 300;
 
 /**
  * POST /api/research — start a research run.
@@ -22,35 +35,24 @@ export async function POST(request: Request) {
 
     const limit = Math.min(body.resultLimit, env.MAX_RESULTS_LIMIT);
 
-    const job = await prisma.researchJob.create({
-      data: {
-        topic: body.topic,
-        problemStatement: body.problemStatement || null,
-        domain: body.domain || null,
-        targetUsers: body.targetUsers || null,
-        geography: body.geography || null,
-        resultLimit: limit,
-        sources: stringifyJson(body.sources),
-        status: "queued",
-        stage: "queued",
-        isDemo: isDemoMode(),
-      },
-    });
+    const job = await createResearchJob({topic: body.topic, problemStatement: body.problemStatement || null, domain: body.domain || null, targetUsers: body.targetUsers || null, geography: body.geography || null, resultLimit: limit, sources: stringifyJson(body.sources), status: "queued", stage: "queued", isDemo: isDemoMode()});
 
     // Fire and forget. The pipeline records its own progress and failures.
-    void runResearch({
-      jobId: job.id,
-      topic: job.topic,
-      problemStatement: job.problemStatement ?? "",
-      domain: job.domain ?? "",
-      targetUsers: job.targetUsers ?? "",
-      geography: job.geography ?? "",
-      sources: body.sources,
-      resultLimit: limit,
-      language: body.language,
-      location: body.location,
-      isDemo: isDemoMode(),
-    });
+    runInBackground("research", () =>
+      runResearch({
+        jobId: job.id,
+        topic: job.topic,
+        problemStatement: job.problemStatement ?? "",
+        domain: job.domain ?? "",
+        targetUsers: job.targetUsers ?? "",
+        geography: job.geography ?? "",
+        sources: body.sources,
+        resultLimit: limit,
+        language: body.language,
+        location: body.location,
+        isDemo: isDemoMode(),
+      }),
+    );
 
     return Response.json(
       {
@@ -60,7 +62,7 @@ export async function POST(request: Request) {
           status: job.status,
           stage: job.stage,
           isDemo: job.isDemo,
-          createdAt: job.createdAt.toISOString(),
+          createdAt: job.createdAt,
         },
         demoMode: isDemoMode(),
       },
@@ -71,35 +73,16 @@ export async function POST(request: Request) {
   }
 }
 
-/** GET /api/research — list the research runs (used by Saved research). */
+/** GET /api/research - list the research runs (used by Saved research). */
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const bookmarkedOnly = url.searchParams.get("bookmarked") === "true";
 
-    const jobs = await prisma.researchJob.findMany({
-      where: bookmarkedOnly ? { isBookmarked: true } : undefined,
-      orderBy: { createdAt: "desc" },
-      take: 50,
-      select: {
-        id: true,
-        topic: true,
-        problemStatement: true,
-        domain: true,
-        targetUsers: true,
-        geography: true,
-        status: true,
-        stage: true,
-        isDemo: true,
-        resultCount: true,
-        isBookmarked: true,
-        createdAt: true,
-        completedAt: true,
-      },
-    });
+    const jobs = await listResearchJobs({ limit: 50, bookmarkedOnly });
 
     return Response.json({
-      jobs: jobs.map((job) => ({ ...job, createdAt: job.createdAt.toISOString() })),
+      jobs,
       demoMode: isDemoMode(),
       providers: getProviderStatus(),
     });

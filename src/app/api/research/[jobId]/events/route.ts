@@ -1,9 +1,19 @@
-import { prisma } from "@/lib/db";
 import { jsonError } from "@/lib/api";
 import { readEvents } from "@/lib/research/events";
+import {
+  getResearchJob,
+} from "@/lib/repo";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * How long this function may run. Vercel clamps this to your plan's limit
+ * (60s on Hobby, 300s on Pro). A research run calls three external APIs, so
+ * it needs more than the default.
+ */
+export const maxDuration = 300;
 
 /**
  * GET /api/research/[jobId]/events — server-sent events for research progress.
@@ -16,10 +26,7 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
   try {
     const { jobId } = await context.params;
 
-    const job = await prisma.researchJob.findUnique({
-      where: { id: jobId },
-      select: { id: true, status: true },
-    });
+    const job = await getResearchJob(jobId);
 
     if (!job) {
       return Response.json(
@@ -77,10 +84,7 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
               send("progress", event, event.id);
             }
 
-            const current = await prisma.researchJob.findUnique({
-              where: { id: jobId },
-              select: { status: true },
-            });
+            const current = await getResearchJob(jobId);
 
             if (current && ["completed", "failed", "cancelled"].includes(current.status)) {
               // Give the client a beat to receive the final events.

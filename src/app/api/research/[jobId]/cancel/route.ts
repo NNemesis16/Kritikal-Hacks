@@ -1,6 +1,10 @@
-import { prisma } from "@/lib/db";
 import { jsonError } from "@/lib/api";
 import { emitEvent } from "@/lib/research/events";
+import {
+  getResearchJob,
+  updateResearchJob,
+} from "@/lib/repo";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,10 +14,7 @@ export async function POST(_request: Request, context: { params: Promise<{ jobId
   try {
     const { jobId } = await context.params;
 
-    const job = await prisma.researchJob.findUnique({
-      where: { id: jobId },
-      select: { id: true, status: true },
-    });
+    const job = await getResearchJob(jobId);
 
     if (!job) {
       return Response.json(
@@ -26,10 +27,7 @@ export async function POST(_request: Request, context: { params: Promise<{ jobId
       return Response.json({ job: { id: jobId, status: job.status } });
     }
 
-    await prisma.researchJob.update({
-      where: { id: jobId },
-      data: { status: "cancelled", stage: "cancelled" },
-    });
+    await updateResearchJob(jobId, {status: "cancelled", stage: "cancelled"});
 
     await emitEvent(jobId, {
       type: "job.cancelled",

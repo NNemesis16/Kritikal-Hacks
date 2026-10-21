@@ -50,9 +50,6 @@ devserver.log
 *.tsbuildinfo
 next-env.d.ts
 
-# Prisma generated client (regenerate with `npx prisma generate`)
-/src/generated/
-
 # editor
 .vscode/
 .idea/

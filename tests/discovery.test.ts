@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { closeDatabase } from "@/lib/db";
 
-import { prisma } from "@/lib/db";
 
 import { POST as startDiscovery, GET as getDiscovery } from "@/app/api/discover/route";
 import { POST as proposalRoute } from "@/app/api/discover/[discoveryId]/proposal/route";
@@ -57,7 +57,7 @@ describe("free-choice discovery (demo mode)", () => {
   });
 
   afterAll(async () => {
-    await prisma.$disconnect();
+    await closeDatabase();
   });
 
   it("completes without the user naming a problem", async () => {

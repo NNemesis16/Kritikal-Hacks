@@ -1,10 +1,23 @@
-import { prisma } from "@/lib/db";
 import { jsonError } from "@/lib/api";
 import { proposalRequestSchema, type SourceId } from "@/lib/schema";
 import { buildProposalForConcept, runDiscovery } from "@/lib/research/discovery";
+import {
+  getIdeaDiscoveryWithRelations,
+  updateIdeaDiscovery,
+} from "@/lib/repo";
+import { runInBackground } from "@/lib/background";
+
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * How long this function may run. Vercel clamps this to your plan's limit
+ * (60s on Hobby, 300s on Pro). A research run calls three external APIs, so
+ * it needs more than the default.
+ */
+export const maxDuration = 300;
 
 /**
  * POST /api/discover/[discoveryId]/proposal
@@ -17,10 +30,7 @@ export async function POST(request: Request, context: { params: Promise<{ discov
   try {
     const { discoveryId } = await context.params;
 
-    const discovery = await prisma.ideaDiscovery.findUnique({
-      where: { id: discoveryId },
-      include: { job: { select: { sources: true, resultLimit: true } } },
-    });
+    const discovery = await getIdeaDiscoveryWithRelations(discoveryId);
 
     if (!discovery) {
       return Response.json(
@@ -39,27 +49,30 @@ export async function POST(request: Request, context: { params: Promise<{ discov
 
     // --- Regenerate: design a fresh set of concepts from the same evidence --
     if (raw.action === "regenerate") {
-      const sources = JSON.parse(discovery.job.sources ?? "[]") as SourceId[];
+      const sources = JSON.parse(discovery.job?.sources ?? "[]") as SourceId[];
 
-      await prisma.ideaDiscovery.update({
-        where: { id: discoveryId },
-        data: { status: "queued", stage: "queued", errorMessage: null },
+      await updateIdeaDiscovery(discoveryId, {
+        status: "queued",
+        stage: "queued",
+        errorMessage: null,
       });
 
-      void runDiscovery({
-        discoveryId,
-        jobId: discovery.jobId,
-        interests: discovery.interests,
-        techPreferences: discovery.techPreferences,
-        teamCapabilities: discovery.teamCapabilities,
-        constraints: discovery.constraints,
-        sources,
-        resultLimit: discovery.job.resultLimit,
-        conceptCount: 5,
-        language: "en",
-        location: "US",
-        isDemo: discovery.isDemo,
-      });
+      runInBackground("discovery-regenerate", () =>
+        runDiscovery({
+          discoveryId,
+          jobId: discovery.jobId,
+          interests: discovery.interests,
+          techPreferences: discovery.techPreferences,
+          teamCapabilities: discovery.teamCapabilities,
+          constraints: discovery.constraints,
+          sources,
+          resultLimit: discovery.job?.resultLimit ?? 30,
+          conceptCount: 5,
+          language: "en",
+          location: "US",
+          isDemo: discovery.isDemo,
+        }),
+      );
 
       return Response.json({ discoveryId, status: "queued" }, { status: 202 });
     }

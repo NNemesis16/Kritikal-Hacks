@@ -8,7 +8,6 @@ import "server-only";
  * behave identically. The only difference between the two is the set of
  * queries that is planned.
  */
-import { prisma } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { stringifyJson } from "@/lib/json";
 import type { SourceCheck, SourceId } from "@/lib/schema";
@@ -18,6 +17,14 @@ import { tinyfishSearch } from "@/lib/providers/tinyfish";
 
 import { emitEvent } from "@/lib/research/events";
 import { platformForUrl, sourceInfo, type QueryPlan } from "@/lib/research/sources";
+import {
+  getResearchJob,
+  updateResearchJob,
+  createProject,
+  createResearchResult,
+  createSourceReference,
+} from "@/lib/repo";
+
 
 /** A discovery hit before normalisation. */
 export interface Discovery {
@@ -63,10 +70,7 @@ export interface CollectionContext {
 
 /** True when the user cancelled the run. */
 export async function isCancelled(jobId: string): Promise<boolean> {
-  const job = await prisma.researchJob.findUnique({
-    where: { id: jobId },
-    select: { status: true },
-  });
+  const job = await getResearchJob(jobId);
   return job?.status === "cancelled";
 }
 
@@ -279,26 +283,7 @@ export async function persistRecords(
     const source = sourceInfo(record.sourceId);
     const attribution = `${record.sourceName} — "${record.title}"`;
 
-    const project = await prisma.project.create({
-      data: {
-        title: record.title,
-        platform: record.platform || platformForUrl(record.url),
-        sourceId: record.sourceId,
-        sourceUrl: record.url,
-        attribution,
-        summary: record.summary,
-        problemAddressed: record.problemAddressed,
-        proposedSolution: record.proposedSolution,
-        targetUsers: record.targetUsers,
-        technologies: stringifyJson(record.technologies),
-        businessModel: record.businessModel,
-        distribution: record.distribution,
-        award: record.award || null,
-        awardVerified: Boolean(record.awardVerified && record.award),
-        ranking: null,
-        domain: record.domain,
-        uncertaintyNotes: stringifyJson(record.uncertaintyNotes),
-        discoveryMetadata: stringifyJson([
+    const project = await createProject({title: record.title, platform: record.platform || platformForUrl(record.url), sourceId: record.sourceId, sourceUrl: record.url, attribution, summary: record.summary, problemAddressed: record.problemAddressed, proposedSolution: record.proposedSolution, targetUsers: record.targetUsers, technologies: stringifyJson(record.technologies), businessModel: record.businessModel, distribution: record.distribution, award: record.award || null, awardVerified: Boolean(record.awardVerified && record.award), ranking: null, domain: record.domain, uncertaintyNotes: stringifyJson(record.uncertaintyNotes), discoveryMetadata: stringifyJson([
           {
             sourceId: record.sourceId,
             sourceName: record.sourceName,
@@ -307,44 +292,14 @@ export async function persistRecords(
             accessMode: record.accessMode,
             retrievedAt: new Date().toISOString(),
           },
-        ]),
-        retrievedAt: new Date(),
-      },
-    });
+        ]), retrievedAt: new Date().toISOString()});
 
-    await prisma.researchResult.create({
-      data: {
-        jobId: context.jobId,
-        projectId: project.id,
-        relevance: 0,
-        rank: 0,
-        discoveryNote: record.accessMode,
-        isDemo: context.isDemo,
-      },
-    });
+    await createResearchResult({jobId: context.jobId, projectId: project.id, relevance: 0, rank: 0, discoveryNote: record.accessMode, isDemo: context.isDemo});
 
-    await prisma.sourceReference.create({
-      data: {
-        jobId: context.jobId,
-        sourceId: record.sourceId,
-        sourceName: source.name,
-        url: record.url,
-        title: record.title,
-        attribution,
-        accessMode: record.accessMode,
-        snippet: record.snippet,
-        retrievedAt: new Date(),
-      },
-    });
+    await createSourceReference({jobId: context.jobId, sourceId: record.sourceId, sourceName: source.name, url: record.url, title: record.title, attribution, accessMode: record.accessMode, snippet: record.snippet});
   }
 
-  await prisma.researchJob.update({
-    where: { id: context.jobId },
-    data: {
-      resultCount: records.length,
-      sourcesChecked: stringifyJson(checks),
-    },
-  });
+  await updateResearchJob(context.jobId, {resultCount: records.length, sourcesChecked: stringifyJson(checks)});
 }
 
 /**

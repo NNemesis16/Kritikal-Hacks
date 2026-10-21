@@ -1,13 +1,14 @@
+/**
+ * Resolve the database URL.
+ *
+ * A relative `file:` URL is resolved against the `prisma/` folder, so
+ * `file:./dev.db` always means `<project>/prisma/dev.db` no matter what the
+ * current working directory is. The CLI scripts and the running app use the
+ * same helper, so they always open the same file.
+ */
 import path from "node:path";
 
-/**
- * Resolve the SQLite database URL.
- *
- * Prisma resolves a relative `file:` URL against the folder that contains
- * `schema.prisma`. This helper makes that explicit so the CLI (via
- * `prisma.config.ts`) and the running app (via `src/lib/db.ts`) always point
- * at the same file, whatever the current working directory is.
- */
+/** The default for local development: a SQLite file inside `prisma/`. */
 export const DEFAULT_DATABASE_URL = "file:./dev.db";
 
 export function resolveDatabaseUrl(raw: string | undefined, rootDir: string): string {
@@ -15,7 +16,9 @@ export function resolveDatabaseUrl(raw: string | undefined, rootDir: string): st
   if (!value.startsWith("file:")) return value;
 
   const filePath = value.slice("file:".length);
-  if (!filePath || filePath === ":memory:" || filePath.startsWith(":memory:")) return value;
+  if (!filePath || filePath === ":memory:" || filePath.startsWith(":memory:")) {
+    return "file::memory:";
+  }
   if (path.isAbsolute(filePath)) return value;
 
   const absolute = path.join(rootDir, "prisma", filePath).replace(/\\/g, "/");

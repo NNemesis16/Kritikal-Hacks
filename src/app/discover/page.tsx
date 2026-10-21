@@ -2,9 +2,13 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { DiscoveryStudio } from "@/components/discovery-studio";
-import { prisma } from "@/lib/db";
 import { parseJson } from "@/lib/json";
 import { sourceCheckSchema } from "@/lib/schema";
+import {
+  getIdeaDiscoveryWithRelations,
+  listIdeaDiscoveries,
+} from "@/lib/repo";
+
 
 export const metadata: Metadata = {
   title: "Find me a winning project idea",
@@ -19,17 +23,10 @@ export default async function DiscoverPage({ searchParams }: PageProps<"/discove
   const discoveryId = typeof params.discoveryId === "string" ? params.discoveryId : "";
 
   const discovery = discoveryId
-    ? await prisma.ideaDiscovery.findUnique({
-        where: { id: discoveryId },
-        include: { job: true },
-      })
+    ? await getIdeaDiscoveryWithRelations(discoveryId)
     : null;
 
-  const recent = await prisma.ideaDiscovery.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 6,
-    include: { job: { select: { resultCount: true } } },
-  });
+  const recent = await listIdeaDiscoveries(6);
 
   const initial = discovery
     ? {
@@ -46,8 +43,8 @@ export default async function DiscoverPage({ searchParams }: PageProps<"/discove
         concepts: parseJson(discovery.concepts, []),
         recommendation: parseJson(discovery.recommendation, null),
         analysis: parseJson(discovery.analysis, {}),
-        sourcesChecked: parseJson(discovery.job.sourcesChecked, [], sourceCheckSchema.array()),
-        resultCount: discovery.job.resultCount,
+        sourcesChecked: parseJson(discovery.job?.sourcesChecked ?? "[]", [], sourceCheckSchema.array()),
+        resultCount: discovery.job?.resultCount ?? 0,
       }
     : null;
 
@@ -80,11 +77,11 @@ export default async function DiscoverPage({ searchParams }: PageProps<"/discove
                   className="flex flex-wrap items-center gap-3 rounded-xl border-[3px] border-ink bg-paper-2 px-4 py-3 text-sm transition-colors hover:border-ink"
                 >
                   <span className="font-medium text-ink">
-                    {run.job.resultCount} record(s) · {run.concepts ? "" : ""}
+                    {run.job?.resultCount ?? 0} record(s) ·{" "}
                     {parseJson<unknown[]>(run.concepts, []).length} concept(s)
                   </span>
                   <span className="text-xs text-ink/60">
-                    {run.createdAt.toLocaleString("en-GB", { timeZone: "UTC" })} UTC
+                    {new Date(run.createdAt).toLocaleString("en-GB", { timeZone: "UTC" })} UTC
                   </span>
                 </Link>
               </li>

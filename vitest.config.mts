@@ -35,6 +35,10 @@ export default defineConfig({
     },
     include: ["tests/**/*.{test,spec}.{ts,tsx}"],
     exclude: ["node_modules/**", ".next/**"],
+    // Every test file shares one SQLite database, and SQLite only allows one
+    // writer at a time. Run the files one after another so they do not
+    // fight over the write lock.
+    fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 60_000,
   },

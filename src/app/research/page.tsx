@@ -3,8 +3,11 @@ import Link from "next/link";
 
 import { ResearchForm } from "@/components/research-form";
 import { Tag, Card, CardBody, CardHeader, EmptyState } from "@/components/ui";
-import { prisma } from "@/lib/db";
 import { formatDate } from "@/lib/utils";
+import {
+  listResearchJobs,
+} from "@/lib/repo";
+
 
 export const metadata: Metadata = {
   title: "Configure research",
@@ -16,18 +19,7 @@ export default async function ResearchPage({ searchParams }: PageProps<"/researc
   const params = await searchParams;
   const initialTopic = typeof params.topic === "string" ? params.topic : "";
 
-  const recent = await prisma.researchJob.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 6,
-    select: {
-      id: true,
-      topic: true,
-      status: true,
-      resultCount: true,
-      isDemo: true,
-      createdAt: true,
-    },
-  });
+  const recent = await listResearchJobs({ limit: 6, bookmarkedOnly: false });
 
   return (
     <div className="mx-auto w-full max-w-7xl px-4 py-10 sm:px-6 lg:px-8">

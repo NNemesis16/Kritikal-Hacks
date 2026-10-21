@@ -6,9 +6,10 @@ const nextConfig: NextConfig = {
   // provider data) simple to reason about.
   cacheComponents: false,
 
-  // Prisma and the provider SDKs must stay outside the bundler so their
-  // native/dynamic parts are not rewritten.
-  serverExternalPackages: ["@prisma/client", "@prisma/adapter-better-sqlite3", "better-sqlite3"],
+  // The database driver must stay outside the bundler so its native parts are
+  // not rewritten. In production the app talks to a hosted database over
+  // HTTPS, so no native code is needed at runtime.
+  serverExternalPackages: ["@libsql/client", "libsql"],
 
   turbopack: {
     rules: {

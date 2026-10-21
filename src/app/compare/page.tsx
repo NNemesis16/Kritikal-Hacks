@@ -4,8 +4,12 @@ import Link from "next/link";
 import { CompareWorkspace } from "@/components/compare-workspace";
 import { JobSelect } from "@/components/job-select";
 import { EmptyState } from "@/components/ui";
-import { prisma } from "@/lib/db";
 import { queryProjects } from "@/lib/projects";
+import {
+  getResearchJob,
+  listResearchJobs,
+} from "@/lib/repo";
+
 
 export const metadata: Metadata = {
   title: "Comparison workspace",
@@ -17,11 +21,7 @@ export default async function ComparePage({ searchParams }: PageProps<"/compare"
   const params = await searchParams;
   const jobId = typeof params.jobId === "string" ? params.jobId : "";
 
-  const jobs = await prisma.researchJob.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 20,
-    select: { id: true, topic: true, isDemo: true },
-  });
+  const jobs = await listResearchJobs({ limit: 20, bookmarkedOnly: false });
 
   if (!jobId) {
     return (
@@ -50,10 +50,7 @@ export default async function ComparePage({ searchParams }: PageProps<"/compare"
     );
   }
 
-  const job = await prisma.researchJob.findUnique({
-    where: { id: jobId },
-    select: { id: true, topic: true, isDemo: true, resultCount: true },
-  });
+  const job = await getResearchJob(jobId);
 
   if (!job) {
     return (

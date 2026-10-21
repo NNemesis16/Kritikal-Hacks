@@ -4,9 +4,15 @@ import Link from "next/link";
 import { JobSelect } from "@/components/job-select";
 import { PitchStudio } from "@/components/pitch-studio";
 import { EmptyState } from "@/components/ui";
-import { prisma } from "@/lib/db";
 import { parseJson } from "@/lib/json";
 import { pitchContentSchema, type PitchContent } from "@/lib/schema";
+import {
+  getResearchJob,
+  listResearchJobs,
+  listProposedConcepts,
+  getPitch,
+} from "@/lib/repo";
+
 
 const EMPTY_PITCH: PitchContent = {
   problem: "",
@@ -33,11 +39,7 @@ export default async function PitchPage({ searchParams }: PageProps<"/pitch">) {
   const params = await searchParams;
   const jobId = typeof params.jobId === "string" ? params.jobId : "";
 
-  const jobs = await prisma.researchJob.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 20,
-    select: { id: true, topic: true, isDemo: true },
-  });
+  const jobs = await listResearchJobs({ limit: 20, bookmarkedOnly: false });
 
   if (!jobId) {
     return (
@@ -66,10 +68,7 @@ export default async function PitchPage({ searchParams }: PageProps<"/pitch">) {
     );
   }
 
-  const job = await prisma.researchJob.findUnique({
-    where: { id: jobId },
-    select: { id: true, topic: true, isDemo: true, resultCount: true },
-  });
+  const job = await getResearchJob(jobId);
 
   if (!job) {
     return (
@@ -80,12 +79,8 @@ export default async function PitchPage({ searchParams }: PageProps<"/pitch">) {
   }
 
   const [conceptRows, pitchRow] = await Promise.all([
-    prisma.proposedConcept.findMany({
-      where: { jobId },
-      orderBy: { createdAt: "asc" },
-      select: { id: true, title: true, tagline: true },
-    }),
-    prisma.pitch.findUnique({ where: { jobId } }),
+    listProposedConcepts(jobId),
+    getPitch(jobId),
   ]);
 
   const initialPitch = pitchRow

@@ -1,13 +1,27 @@
-import { prisma } from "@/lib/db";
 import { jsonError, parseJsonBody, parseQuery } from "@/lib/api";
 import { getEnv, getProviderStatus, isDemoMode } from "@/lib/env";
 import { parseJson, stringifyJson } from "@/lib/json";
 import { discoveryRequestSchema, sourceCheckSchema } from "@/lib/schema";
 import { runDiscovery } from "@/lib/research/discovery";
 import { z } from "zod";
+import {
+  createResearchJob,
+  createIdeaDiscovery,
+  getIdeaDiscoveryWithRelations,
+} from "@/lib/repo";
+import { runInBackground } from "@/lib/background";
+
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * How long this function may run. Vercel clamps this to your plan's limit
+ * (60s on Hobby, 300s on Pro). A research run calls three external APIs, so
+ * it needs more than the default.
+ */
+export const maxDuration = 300;
 
 /**
  * POST /api/discover — start a free-choice discovery run.
@@ -24,46 +38,26 @@ export async function POST(request: Request) {
 
     const resultLimit = Math.min(body.resultLimit, env.MAX_RESULTS_LIMIT);
 
-    const job = await prisma.researchJob.create({
-      data: {
-        // There is no user topic in free-choice mode, so the job is titled
-        // after what the run is for.
-        topic: "Free-choice discovery — finding a problem worth solving",
-        resultLimit,
-        sources: stringifyJson(body.sources),
-        status: "queued",
-        stage: "queued",
-        isDemo: demo,
-      },
-    });
+    const job = await createResearchJob({topic: "Free-choice discovery — finding a problem worth solving", resultLimit, sources: stringifyJson(body.sources), status: "queued", stage: "queued", isDemo: demo});
 
-    const discovery = await prisma.ideaDiscovery.create({
-      data: {
+    const discovery = await createIdeaDiscovery({jobId: job.id, interests: body.interests, techPreferences: body.techPreferences, teamCapabilities: body.teamCapabilities, constraints: body.constraints, status: "queued", stage: "queued", isDemo: demo});
+
+    runInBackground("discovery", () =>
+      runDiscovery({
+        discoveryId: discovery.id,
         jobId: job.id,
         interests: body.interests,
         techPreferences: body.techPreferences,
         teamCapabilities: body.teamCapabilities,
         constraints: body.constraints,
-        status: "queued",
-        stage: "queued",
+        sources: body.sources,
+        resultLimit,
+        conceptCount: body.conceptCount,
+        language: body.language,
+        location: body.location,
         isDemo: demo,
-      },
-    });
-
-    void runDiscovery({
-      discoveryId: discovery.id,
-      jobId: job.id,
-      interests: body.interests,
-      techPreferences: body.techPreferences,
-      teamCapabilities: body.teamCapabilities,
-      constraints: body.constraints,
-      sources: body.sources,
-      resultLimit,
-      conceptCount: body.conceptCount,
-      language: body.language,
-      location: body.location,
-      isDemo: demo,
-    });
+      }),
+    );
 
     return Response.json(
       {
@@ -90,10 +84,7 @@ export async function GET(request: Request) {
   try {
     const { discoveryId } = parseQuery(request.url, querySchema);
 
-    const discovery = await prisma.ideaDiscovery.findUnique({
-      where: { id: discoveryId },
-      include: { job: true, proposals: { orderBy: { createdAt: "desc" } } },
-    });
+    const discovery = await getIdeaDiscoveryWithRelations(discoveryId);
 
     if (!discovery) {
       return Response.json(
@@ -117,15 +108,15 @@ export async function GET(request: Request) {
         concepts: parseJson(discovery.concepts, []),
         recommendation: parseJson(discovery.recommendation, null),
         analysis: parseJson(discovery.analysis, {}),
-        sourcesChecked: parseJson(discovery.job.sourcesChecked, [], sourceCheckSchema.array()),
-        resultCount: discovery.job.resultCount,
-        createdAt: discovery.createdAt.toISOString(),
-        proposals: discovery.proposals.map((proposal) => ({
+        sourcesChecked: parseJson(discovery.job?.sourcesChecked ?? "[]", [], sourceCheckSchema.array()),
+        resultCount: discovery.job?.resultCount ?? 0,
+        createdAt: discovery.createdAt,
+        proposals: (discovery.proposals ?? []).map((proposal) => ({
           id: proposal.id,
           conceptId: proposal.conceptId,
           title: proposal.title,
           isDemo: proposal.isDemo,
-          createdAt: proposal.createdAt.toISOString(),
+          createdAt: proposal.createdAt,
         })),
       },
       demoMode: isDemoMode(),

@@ -1,7 +1,10 @@
-import { prisma } from "@/lib/db";
 import { jsonError } from "@/lib/api";
 import { parseJson } from "@/lib/json";
 import { sourceCheckSchema } from "@/lib/schema";
+import {
+  getResearchJob,
+} from "@/lib/repo";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,29 +14,7 @@ export async function GET(_request: Request, context: { params: Promise<{ jobId:
   try {
     const { jobId } = await context.params;
 
-    const job = await prisma.researchJob.findUnique({
-      where: { id: jobId },
-      select: {
-        id: true,
-        topic: true,
-        problemStatement: true,
-        domain: true,
-        targetUsers: true,
-        geography: true,
-        resultLimit: true,
-        sources: true,
-        status: true,
-        stage: true,
-        isDemo: true,
-        errorMessage: true,
-        resultCount: true,
-        sourcesChecked: true,
-        isBookmarked: true,
-        createdAt: true,
-        updatedAt: true,
-        completedAt: true,
-      },
-    });
+    const job = await getResearchJob(jobId);
 
     if (!job) {
       return Response.json(
@@ -47,9 +28,6 @@ export async function GET(_request: Request, context: { params: Promise<{ jobId:
         ...job,
         sources: parseJson<string[]>(job.sources, []),
         sourcesChecked: parseJson(job.sourcesChecked, [], sourceCheckSchema.array()),
-        createdAt: job.createdAt.toISOString(),
-        updatedAt: job.updatedAt.toISOString(),
-        completedAt: job.completedAt?.toISOString() ?? null,
       },
     });
   } catch (error) {

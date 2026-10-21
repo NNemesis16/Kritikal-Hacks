@@ -7,29 +7,23 @@ import "server-only";
  * section listing the public projects the work drew on, so a reader can see
  * what is borrowed and what is the user's own.
  */
-import { prisma } from "@/lib/db";
 import { parseJson } from "@/lib/json";
 import { marketGapSchema, pitchContentSchema, type PitchContent } from "@/lib/schema";
+import {
+  getResearchJobForExport,
+} from "@/lib/repo";
+
 
 function bullet(value: string): string {
   return value.trim() ? `- ${value.trim()}` : "- _(not stated)_";
 }
 
 export async function buildMarkdownReport(jobId: string): Promise<string> {
-  const job = await prisma.researchJob.findUnique({
-    where: { id: jobId },
-    include: {
-      results: { orderBy: { rank: "asc" }, include: { project: true } },
-      report: true,
-      concepts: { orderBy: { createdAt: "asc" } },
-      pitch: true,
-      experiments: { orderBy: { createdAt: "asc" } },
-      sourceReferences: { orderBy: { retrievedAt: "asc" } },
-    },
-  });
+  const bundle = await getResearchJobForExport(jobId);
 
-  if (!job) throw new Error("That research job does not exist.");
+  if (!bundle) throw new Error("That research job does not exist.");
 
+  const job = bundle.job;
   const lines: string[] = [];
   const isDemo = job.isDemo;
 
@@ -40,7 +34,7 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
   if (job.domain) lines.push(`**Domain:** ${job.domain}`);
   if (job.targetUsers) lines.push(`**Target users:** ${job.targetUsers}`);
   if (job.geography) lines.push(`**Geography:** ${job.geography}`);
-  lines.push(`**Generated:** ${job.createdAt.toISOString()}`);
+  lines.push(`**Generated:** ${job.createdAt}`);
   lines.push(`**Records found:** ${job.resultCount}`);
   lines.push("");
 
@@ -82,17 +76,18 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
   lines.push("");
   lines.push("## 2. Projects found");
   lines.push("");
-  if (job.results.length === 0) {
+  if (bundle.results.length === 0) {
     lines.push("_No project records were collected for this run._");
   } else {
-    for (const [index, result] of job.results.entries()) {
+    for (const [index, result] of bundle.results.entries()) {
       const project = result.project;
+      if (!project) continue;
       lines.push(`### ${index + 1}. ${project.title}`);
       lines.push("");
       lines.push(`- **Platform:** ${project.platform}`);
       lines.push(`- **Source:** ${project.attribution}`);
       lines.push(`- **Link:** ${project.sourceUrl}`);
-      lines.push(`- **Retrieved:** ${project.retrievedAt.toISOString()}`);
+      lines.push(`- **Retrieved:** ${project.retrievedAt}`);
       lines.push(`- **Relevance:** ${Math.round(result.relevance * 100)}%`);
       lines.push("");
       lines.push(`**Summary:** ${project.summary}`);
@@ -120,16 +115,16 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
     }
   }
 
-  if (job.report) {
-    const gaps = parseJson(job.report.gaps, [], marketGapSchema.array());
+  if (bundle.report) {
+    const gaps = parseJson(bundle.report.gaps, [], marketGapSchema.array());
     const patterns = parseJson<Array<{ pattern: string; occurrences: string[]; evidenceCount: number }>>(
-      job.report.patterns,
+      bundle.report.patterns,
       [],
     );
-    const competitors = parseJson<Array<Record<string, unknown>>>(job.report.competitors, []);
-    const assumptions = parseJson<Array<Record<string, unknown>>>(job.report.assumptions, []);
+    const competitors = parseJson<Array<Record<string, unknown>>>(bundle.report.competitors, []);
+    const assumptions = parseJson<Array<Record<string, unknown>>>(bundle.report.assumptions, []);
     const sources = parseJson<Array<{ title: string; url: string; source: string }>>(
-      job.report.sources,
+      bundle.report.sources,
       [],
     );
 
@@ -137,7 +132,7 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
     lines.push("");
     lines.push("## 3. Market-gap report");
     lines.push("");
-    lines.push(job.report.summary);
+    lines.push(bundle.report.summary);
     lines.push("");
 
     lines.push("### Gaps");
@@ -207,8 +202,8 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
 
     lines.push("### Validation experiments");
     lines.push("");
-    if (job.experiments.length === 0) lines.push("_No experiments were proposed._");
-    for (const experiment of job.experiments) {
+    if (bundle.experiments.length === 0) lines.push("_No experiments were proposed._");
+    for (const experiment of bundle.experiments) {
       lines.push(`#### ${experiment.title}`);
       lines.push("");
       lines.push(`- **Hypothesis:** ${experiment.hypothesis}`);
@@ -229,12 +224,12 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
     lines.push("");
   }
 
-  if (job.concepts.length) {
+  if (bundle.concepts.length) {
     lines.push("---");
     lines.push("");
     lines.push("## 4. Proposed concepts");
     lines.push("");
-    for (const concept of job.concepts) {
+    for (const concept of bundle.concepts) {
       lines.push(`### ${concept.title}`);
       lines.push("");
       lines.push(`> ${concept.tagline}`);
@@ -265,8 +260,8 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
     }
   }
 
-  if (job.pitch) {
-    const content = parseJson(job.pitch.content, {} as PitchContent, pitchContentSchema);
+  if (bundle.pitch) {
+    const content = parseJson(bundle.pitch.content, {} as PitchContent, pitchContentSchema);
     lines.push("---");
     lines.push("");
     lines.push("## 5. Pitch");
@@ -297,7 +292,7 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
       lines.push(bullet(question));
     }
     lines.push("");
-    const honesty = parseJson<string[]>(job.pitch.clarityNotes, []);
+    const honesty = parseJson<string[]>(bundle.pitch.clarityNotes, []);
     if (honesty.length) {
       lines.push("### Reviewer notes");
       for (const note of honesty) lines.push(bullet(note));
@@ -316,8 +311,9 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
   );
   lines.push("");
   const seen = new Set<string>();
-  for (const result of job.results) {
+  for (const result of bundle.results) {
     const project = result.project;
+    if (!project) continue;
     if (seen.has(project.sourceUrl)) continue;
     seen.add(project.sourceUrl);
     lines.push(`- [${project.title}](${project.sourceUrl}) — ${project.attribution}`);
@@ -328,12 +324,12 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
   lines.push("");
   lines.push("### Source pages retrieved");
   lines.push("");
-  if (job.sourceReferences.length === 0) {
+  if (bundle.sourceReferences.length === 0) {
     lines.push("_No source pages were retrieved._");
   } else {
-    for (const reference of job.sourceReferences) {
+    for (const reference of bundle.sourceReferences) {
       lines.push(
-        `- [${reference.title ?? reference.url}](${reference.url}) — ${reference.sourceName} — access: ${reference.accessMode} — retrieved ${reference.retrievedAt.toISOString()}`,
+        `- [${reference.title ?? reference.url}](${reference.url}) — ${reference.sourceName} — access: ${reference.accessMode} — retrieved ${reference.retrievedAt}`,
       );
     }
   }
@@ -350,19 +346,11 @@ export async function buildMarkdownReport(jobId: string): Promise<string> {
 }
 
 export async function buildJsonExport(jobId: string): Promise<unknown> {
-  const job = await prisma.researchJob.findUnique({
-    where: { id: jobId },
-    include: {
-      results: { orderBy: { rank: "asc" }, include: { project: true } },
-      report: true,
-      concepts: true,
-      pitch: true,
-      experiments: true,
-      sourceReferences: true,
-    },
-  });
+  const bundle = await getResearchJobForExport(jobId);
 
-  if (!job) throw new Error("That research job does not exist.");
+  if (!bundle) throw new Error("That research job does not exist.");
+
+  const job = bundle.job;
 
   return {
     job: {
@@ -375,42 +363,45 @@ export async function buildJsonExport(jobId: string): Promise<unknown> {
       status: job.status,
       isDemo: job.isDemo,
       resultCount: job.resultCount,
-      createdAt: job.createdAt.toISOString(),
-      completedAt: job.completedAt?.toISOString() ?? null,
+      createdAt: job.createdAt,
+      completedAt: job.completedAt ?? null,
     },
     sourcesChecked: parseJson(job.sourcesChecked, []),
-    projects: job.results.map((result) => ({
-      id: result.project.id,
-      title: result.project.title,
-      platform: result.project.platform,
-      summary: result.project.summary,
-      problemAddressed: result.project.problemAddressed,
-      proposedSolution: result.project.proposedSolution,
-      targetUsers: result.project.targetUsers,
-      technologies: parseJson<string[]>(result.project.technologies, []),
-      businessModel: result.project.businessModel,
-      distribution: result.project.distribution,
-      award: result.project.award,
-      awardVerified: result.project.awardVerified,
-      domain: result.project.domain,
-      uncertaintyNotes: parseJson<string[]>(result.project.uncertaintyNotes, []),
-      sourceUrl: result.project.sourceUrl,
-      attribution: result.project.attribution,
-      retrievedAt: result.project.retrievedAt.toISOString(),
-      relevance: result.relevance,
-    })),
-    report: job.report
+    projects: bundle.results.map((result) => {
+      const project = result.project;
+      return {
+        id: project?.id ?? "",
+        title: project?.title ?? "",
+        platform: project?.platform ?? "",
+        summary: project?.summary ?? "",
+        problemAddressed: project?.problemAddressed ?? null,
+        proposedSolution: project?.proposedSolution ?? null,
+        targetUsers: project?.targetUsers ?? null,
+        technologies: parseJson<string[]>(project?.technologies ?? "[]", []),
+        businessModel: project?.businessModel ?? null,
+        distribution: project?.distribution ?? null,
+        award: project?.award ?? null,
+        awardVerified: project?.awardVerified ?? false,
+        domain: project?.domain ?? null,
+        uncertaintyNotes: parseJson<string[]>(project?.uncertaintyNotes ?? "[]", []),
+        sourceUrl: project?.sourceUrl ?? "",
+        attribution: project?.attribution ?? "",
+        retrievedAt: project?.retrievedAt ?? "",
+        relevance: result.relevance,
+      };
+    }),
+    report: bundle.report
       ? {
-          summary: job.report.summary,
-          gaps: parseJson(job.report.gaps, [], marketGapSchema.array()),
-          patterns: parseJson(job.report.patterns, []),
-          competitors: parseJson(job.report.competitors, []),
-          assumptions: parseJson(job.report.assumptions, []),
-          sources: parseJson(job.report.sources, []),
-          isDemo: job.report.isDemo,
+          summary: bundle.report?.summary ?? "",
+          gaps: parseJson(bundle.report.gaps, [], marketGapSchema.array()),
+          patterns: parseJson(bundle.report.patterns, []),
+          competitors: parseJson(bundle.report.competitors, []),
+          assumptions: parseJson(bundle.report.assumptions, []),
+          sources: parseJson(bundle.report.sources, []),
+          isDemo: bundle.report?.isDemo ?? false,
         }
       : null,
-    experiments: job.experiments.map((experiment) => ({
+    experiments: bundle.experiments.map((experiment) => ({
       title: experiment.title,
       hypothesis: experiment.hypothesis,
       method: experiment.method,
@@ -420,7 +411,7 @@ export async function buildJsonExport(jobId: string): Promise<unknown> {
       cost: experiment.cost,
       relatedGapId: experiment.relatedGapId,
     })),
-    concepts: job.concepts.map((concept) => ({
+    concepts: bundle.concepts.map((concept) => ({
       title: concept.title,
       tagline: concept.tagline,
       problem: concept.problem,
@@ -432,21 +423,21 @@ export async function buildJsonExport(jobId: string): Promise<unknown> {
       validationPlan: concept.validationPlan,
       similarityWarning: concept.similarityWarning,
     })),
-    pitch: job.pitch
+    pitch: bundle.pitch
       ? {
-          content: parseJson(job.pitch.content, {} as PitchContent, pitchContentSchema),
-          clarityScore: job.pitch.clarityScore,
-          clarityNotes: parseJson<string[]>(job.pitch.clarityNotes, []),
-          isDemo: job.pitch.isDemo,
+          content: parseJson(bundle.pitch?.content ?? "{}", {} as PitchContent, pitchContentSchema),
+          clarityScore: bundle.pitch?.clarityScore ?? null,
+          clarityNotes: parseJson<string[]>(bundle.pitch?.clarityNotes ?? "[]", []),
+          isDemo: bundle.pitch?.isDemo ?? false,
         }
       : null,
-    sourceReferences: job.sourceReferences.map((reference) => ({
+    sourceReferences: bundle.sourceReferences.map((reference) => ({
       url: reference.url,
       title: reference.title,
       sourceName: reference.sourceName,
       attribution: reference.attribution,
       accessMode: reference.accessMode,
-      retrievedAt: reference.retrievedAt.toISOString(),
+      retrievedAt: reference.retrievedAt,
     })),
   };
 }
