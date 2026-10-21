@@ -73,7 +73,6 @@ interface BlobMirror {
  */
 async function createBlobMirror(): Promise<BlobMirror | null> {
   const storeId = process.env.BLOB_STORE_ID?.trim();
-  const oidcToken = process.env.VERCEL_OIDC_TOKEN?.trim();
   const readWriteToken = process.env.BLOB_READ_WRITE_TOKEN?.trim();
 
   if (!storeId && !readWriteToken) return null;
@@ -81,7 +80,10 @@ async function createBlobMirror(): Promise<BlobMirror | null> {
   try {
     const { put, get } = await import("@vercel/blob");
 
-    const options = storeId && oidcToken ? { storeId, oidcToken } : readWriteToken ? { token: readWriteToken } : null;
+    // Only the store id is passed. The SDK then fetches a LIVE, short-lived
+    // OIDC token from the request context — passing a token by hand would
+    // bypass that and send a stale one, which the store rejects.
+    const options = storeId ? { storeId } : { token: readWriteToken as string };
     if (!options) return null;
 
     return {
