@@ -21,6 +21,7 @@ It combines web research, AI-powered analysis, project comparison, and structure
 - [System Architecture](#-system-architecture)
 - [Getting Started](#-getting-started)
 - [Environment Configuration](#-environment-configuration)
+- [Live deployment](#-live-deployment)
 - [Deploy to Vercel](#-deploy-to-vercel)
 - [Demo Mode](#-demo-mode)
 - [Available Commands](#-available-commands)
@@ -538,6 +539,28 @@ PROVIDER_TIMEOUT_MS=45000
 Replace placeholder values with your own credentials. If you are exploring demo mode, you can leave the credentials blank and set `DEMO_MODE=true`.
 
 **Security note:** Do not place private credentials in client-side variables such as `NEXT_PUBLIC_*`. Do not commit `.env.local` or share your API keys in screenshots, issues, or public messages.
+
+---
+
+## 🌐 Live deployment
+
+The app is deployed and running:
+
+**https://kritikal-hacks.vercel.app**
+
+Share that link with your teammates and the judges. Everything works there — the research runs,
+the project explorer, the free-choice discovery mode and the exports.
+
+The one thing to know: **the demo deployment is running in demo mode**, because no provider API
+keys and no hosted database have been attached to it yet. That means:
+
+- the research uses the bundled sample dataset, and every record is labelled as demo data
+- the deployment has no writable database, so anything you save there is not kept
+
+To switch it to live research, add the provider keys and a hosted database (the next section
+explains exactly how) and redeploy. The interface tells you which mode it is in with a banner
+across the top, and `curl https://kritikal-hacks.vercel.app/api/health` reports exactly what is
+configured and what is working.
 
 ---
 
