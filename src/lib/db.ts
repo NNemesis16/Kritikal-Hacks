@@ -321,6 +321,42 @@ export async function flushDatabase(): Promise<void> {
   }
 }
 
+/** Diagnostics for the health check. */
+export async function getDatabaseDiagnostics(): Promise<{
+  jobCount: number;
+  localBytes: number | null;
+  mirrorBytes: number | null;
+}> {
+  let jobCount = 0;
+  try {
+    const row = await queryOne<{ total: number }>(
+      "SELECT COUNT(*) AS total FROM research_jobs",
+    );
+    jobCount = Number(row?.total ?? 0);
+  } catch {
+    jobCount = -1;
+  }
+
+  let localBytes: number | null = null;
+  try {
+    if (localFilePath) localBytes = readFileSync(localFilePath).byteLength;
+  } catch {
+    localBytes = null;
+  }
+
+  let mirrorBytes: number | null = null;
+  try {
+    if (blobMirror) {
+      const bytes = await blobMirror.get();
+      mirrorBytes = bytes ? bytes.byteLength : 0;
+    }
+  } catch {
+    mirrorBytes = null;
+  }
+
+  return { jobCount, localBytes, mirrorBytes };
+}
+
 async function connect(): Promise<void> {
   const url = resolveDatabaseUrl(getDatabaseUrl(), process.cwd());
   const authToken = getDatabaseAuthToken();
