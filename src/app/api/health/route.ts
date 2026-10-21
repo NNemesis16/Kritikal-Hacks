@@ -1,5 +1,10 @@
 import { getProviderStatus, isDemoMode } from "@/lib/env";
-import { isEphemeralDatabase, isRemoteDatabase, queryOne } from "@/lib/db";
+import {
+  hasBlobMirror,
+  isEphemeralDatabase,
+  isRemoteDatabase,
+  queryOne,
+} from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,6 +23,7 @@ export async function GET() {
     error: string | null;
     remote: boolean;
     ephemeral: boolean;
+    blobMirrored: boolean;
   };
   try {
     await queryOne("SELECT 1 AS ok");
@@ -26,6 +32,7 @@ export async function GET() {
       error: null,
       remote: isRemoteDatabase(),
       ephemeral: isEphemeralDatabase(),
+      blobMirrored: hasBlobMirror(),
     };
   } catch (error) {
     database = {
@@ -33,6 +40,7 @@ export async function GET() {
       error: error instanceof Error ? error.message : "The database is not reachable.",
       remote: isRemoteDatabase(),
       ephemeral: false,
+      blobMirrored: false,
     };
   }
 
@@ -46,7 +54,9 @@ export async function GET() {
       explicitlyConfigured: Boolean(process.env.DATABASE_URL),
       kind: isRemoteDatabase() ? "hosted (libSQL/Turso)" : "local SQLite file",
       message: database.ephemeral
-        ? "The configured database cannot be written to, so the app is running on an in-memory copy. Nothing is saved. Add DATABASE_URL and DATABASE_AUTH_TOKEN to make it persistent."
+        ? database.blobMirrored
+          ? "No DATABASE_URL was set, so the app is using a fallback database that is mirrored to Vercel Blob. Add DATABASE_URL and DATABASE_AUTH_TOKEN to use a real database."
+          : "The configured database cannot be written to, so the app is running on an in-memory copy. Nothing is saved. Add DATABASE_URL and DATABASE_AUTH_TOKEN to make it persistent."
         : undefined,
     },
     providers: getProviderStatus(),

@@ -10,18 +10,25 @@ import "server-only";
  * WHERE THE DATA LIVES
  * --------------------
  *   file:./dev.db   → a SQLite file in `prisma/` (local development)
- *   libsql://…       → a hosted libSQL/Turso database (production on Vercel)
+ *   libsql://…       → a hosted libSQL/Turso database (the recommended setup)
  *
  * WHY THERE IS A FALLBACK
  * -----------------------
- * On Vercel the file system is read-only. If the configured database cannot
- * be written to, the app would be broken with a confusing error. Instead it
- * falls back to an **in-memory SQLite database** loaded with the bundled demo
- * dataset. That fallback is NOT silent: `/api/health` reports it, and the
- * interface shows a banner saying that changes are not saved. As soon as a
- * real database is attached, it is used and the fallback never happens.
+ * On Vercel the file system is read-only, and each serverless bundle gets its
+ * own memory. So without a hosted database the app would either crash or lose
+ * everything between two requests. This module handles that in two steps:
+ *
+ *   1. If the configured database cannot be written to, it falls back to a
+ *      local SQLite file in the temporary directory.
+ *   2. If a Vercel Blob store is attached (`BLOB_STORE_ID`), that file is
+ *      mirrored to Blob, so every serverless instance reads and writes the
+ *      SAME data. The interface says so, and `/api/health` reports it.
+ *
+ * The fallback is never silent, and it disappears the moment a real database
+ * is attached.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { createClient, type Client, type InValue } from "@libsql/client";
@@ -48,16 +55,85 @@ export function isRemoteDatabase(): boolean {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Blob mirror (the fallback storage on Vercel)                               */
+/* -------------------------------------------------------------------------- */
+
+const BLOB_PATHNAME = "projectscope-state.db";
+
+interface BlobMirror {
+  get(): Promise<Uint8Array | null>;
+  put(bytes: Uint8Array): Promise<void>;
+}
+
+/**
+ * A Vercel Blob store used to mirror the database.
+ *
+ * Returns null when no store is attached, which is the case in local
+ * development.
+ */
+async function createBlobMirror(): Promise<BlobMirror | null> {
+  const storeId = process.env.BLOB_STORE_ID?.trim();
+  const oidcToken = process.env.VERCEL_OIDC_TOKEN?.trim();
+  const readWriteToken = process.env.BLOB_READ_WRITE_TOKEN?.trim();
+
+  if (!storeId && !readWriteToken) return null;
+
+  try {
+    const { put, get } = await import("@vercel/blob");
+
+    const options = storeId && oidcToken ? { storeId, oidcToken } : readWriteToken ? { token: readWriteToken } : null;
+    if (!options) return null;
+
+    return {
+      async get() {
+        const result = await get(BLOB_PATHNAME, {
+          ...options,
+          access: "private",
+          // A missing blob is not an error — it just means a fresh database.
+        }).catch(() => null);
+        if (!result) return null;
+        if (result instanceof Uint8Array) return result;
+        if (result && typeof result === "object" && "arrayBuffer" in result) {
+          const buffer = await (result as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer();
+          return new Uint8Array(buffer);
+        }
+        return null;
+      },
+      async put(bytes) {
+        await put(BLOB_PATHNAME, Buffer.from(bytes), {
+          ...options,
+          access: "private",
+          contentType: "application/octet-stream",
+          addRandomSuffix: false,
+          allowOverwrite: true,
+        });
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Connection                                                                 */
 /* -------------------------------------------------------------------------- */
 
 let client: Client | undefined;
-let ephemeral = false;
 let ready: Promise<void> | undefined;
+let ephemeral = false;
+let blobMirror: BlobMirror | null = null;
+let localFilePath: string | null = null;
+let dirty = false;
+let flushing: Promise<void> | null = null;
 
-/** True when the app is running on an in-memory database (nothing is saved). */
+/** True when the app is running on the fallback database. */
 export function isEphemeralDatabase(): boolean {
   return ephemeral;
+}
+
+/** True when the fallback is mirrored to a Vercel Blob store. */
+export function hasBlobMirror(): boolean {
+  return blobMirror !== null;
 }
 
 /** Read the schema file. It is bundled with the app by next.config.ts. */
@@ -105,6 +181,34 @@ async function isWritable(target: Client): Promise<boolean> {
   }
 }
 
+/** Upload the local database file to Blob so other instances can see it. */
+async function flushToBlob(): Promise<void> {
+  if (!blobMirror || !localFilePath) return;
+  if (!dirty) return;
+
+  dirty = false;
+  try {
+    const bytes = readFileSync(localFilePath);
+    await blobMirror.put(new Uint8Array(bytes));
+  } catch {
+    // A failed mirror is not fatal — the data is still in this instance.
+  }
+}
+
+/** Mark the database as changed and schedule a mirror upload. */
+function scheduleFlush(): void {
+  if (!blobMirror) return;
+  dirty = true;
+  if (flushing) return;
+  // Coalesce bursts of writes into one upload.
+  flushing = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      flushing = null;
+      void flushToBlob().finally(resolve);
+    }, 250);
+  });
+}
+
 async function connect(): Promise<void> {
   const url = resolveDatabaseUrl(getDatabaseUrl(), process.cwd());
   const authToken = getDatabaseAuthToken();
@@ -117,34 +221,47 @@ async function connect(): Promise<void> {
     return;
   }
 
-  // The database exists but cannot be written to (a read-only deployment, a
-  // file inside a read-only bundle, a file that is not there yet). Fall back
-  // to an in-memory database so the app still works, and say so out loud.
+  // The configured database cannot be written to. Fall back to a local file in
+  // the temporary directory, mirrored to Blob when a store is attached.
   primary.close();
 
-  const memory = createClient({ url: "file::memory:" });
-  const schema = splitStatements(readSchema());
-  for (const statement of schema) {
-    await memory.execute(statement);
+  blobMirror = await createBlobMirror();
+
+  const directory = path.join(os.tmpdir(), "projectscope");
+  mkdirSync(directory, { recursive: true });
+  localFilePath = path.join(directory, "state.db");
+
+  if (blobMirror) {
+    const existing = await blobMirror.get();
+    if (existing) {
+      try {
+        writeFileSync(localFilePath, existing);
+      } catch {
+        // Fall through and start fresh.
+      }
+    }
   }
 
-  const { seedDatabase } = await import("@/lib/research/seed");
-  await seedDatabase(memory);
+  const fallback = createClient({ url: `file:${localFilePath}` });
+  const schema = splitStatements(readSchema());
+  for (const statement of schema) {
+    await fallback.execute(statement);
+  }
 
-  client = memory;
+  // If the file was empty (or restored empty), fill it with the demo data.
+  const row = await fallback.execute("SELECT COUNT(*) AS total FROM research_jobs");
+  const total = Number((row.rows[0] as { total?: number })?.total ?? 0);
+  if (total === 0) {
+    const { seedDatabase } = await import("@/lib/research/seed");
+    await seedDatabase(fallback);
+    scheduleFlush();
+  }
+
+  client = fallback;
   ephemeral = true;
 }
 
 function getClient(): Client {
-  if (!ready) {
-    ready = connect().catch((error) => {
-      // Let the next call try again, but keep the reason for the health check.
-      ready = undefined;
-      throw error;
-    });
-  }
-  // The client is assigned by `connect()`; if it is not ready yet the caller
-  // waits for the same promise.
   if (!client) {
     throw new Error("The database connection is still starting. Please retry in a moment.");
   }
@@ -216,6 +333,7 @@ export async function queryOne<T = Row>(sql: string, params: InValue[] = []): Pr
 export async function execute(sql: string, params: InValue[] = []): Promise<void> {
   await waitForDatabase();
   await withBusyRetry(() => getClient().execute(sql, params));
+  scheduleFlush();
 }
 
 /** A fresh id for a row. */

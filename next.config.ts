@@ -9,7 +9,7 @@ const nextConfig: NextConfig = {
   // The database driver must stay outside the bundler so its native parts are
   // not rewritten. In production the app talks to a hosted database over
   // HTTPS, so no native code is needed at runtime.
-  serverExternalPackages: ["@libsql/client", "libsql"],
+  serverExternalPackages: ["@libsql/client", "libsql", "@vercel/blob"],
 
   // The schema file is read at runtime when the app falls back to an
   // in-memory database, so it has to travel with the deployment.
