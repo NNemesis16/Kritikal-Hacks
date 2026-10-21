@@ -124,7 +124,6 @@ let ephemeral = false;
 let blobMirror: BlobMirror | null = null;
 let localFilePath: string | null = null;
 let dirty = false;
-let flushing: Promise<void> | null = null;
 
 /** True when the app is running on the fallback database. */
 export function isEphemeralDatabase(): boolean {
@@ -195,18 +194,43 @@ async function flushToBlob(): Promise<void> {
   }
 }
 
-/** Mark the database as changed and schedule a mirror upload. */
-function scheduleFlush(): void {
-  if (!blobMirror) return;
+/**
+ * Mark the database as changed and mirror it to Blob.
+ *
+ * The upload is awaited, because a serverless function can be frozen the
+ * moment its response is sent — a timer scheduled for later would simply
+ * never run. Concurrent writes are coalesced so a run that inserts a few
+ * dozen rows does not upload a few dozen times.
+ */
+let pendingFlush: Promise<void> | null = null;
+
+function scheduleFlush(): Promise<void> {
+  if (!blobMirror) return Promise.resolve();
   dirty = true;
-  if (flushing) return;
-  // Coalesce bursts of writes into one upload.
-  flushing = new Promise<void>((resolve) => {
-    setTimeout(() => {
-      flushing = null;
-      void flushToBlob().finally(resolve);
-    }, 250);
-  });
+
+  if (!pendingFlush) {
+    pendingFlush = (async () => {
+      // A short pause lets a burst of writes become one upload.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      try {
+        await flushToBlob();
+      } finally {
+        pendingFlush = null;
+      }
+    })();
+  }
+
+  return pendingFlush;
+}
+
+/** Force an upload of the current state. Used before a response is sent. */
+export async function flushDatabase(): Promise<void> {
+  if (pendingFlush) {
+    await pendingFlush;
+  }
+  if (dirty) {
+    await flushToBlob();
+  }
 }
 
 async function connect(): Promise<void> {
@@ -333,7 +357,10 @@ export async function queryOne<T = Row>(sql: string, params: InValue[] = []): Pr
 export async function execute(sql: string, params: InValue[] = []): Promise<void> {
   await waitForDatabase();
   await withBusyRetry(() => getClient().execute(sql, params));
-  scheduleFlush();
+  // Mirror the change so other serverless instances can see it. This is
+  // awaited: a serverless function can be frozen as soon as its response is
+  // sent, so a deferred upload would be lost.
+  await scheduleFlush();
 }
 
 /** A fresh id for a row. */
