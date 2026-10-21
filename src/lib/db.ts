@@ -3,18 +3,27 @@ import "server-only";
 /**
  * The database connection.
  *
- * There is no ORM and no code generation. This module owns a single libSQL
- * client and exposes two tiny helpers: `query` for reading rows and
- * `execute` for writing them.
+ * There is no ORM and no code generation. This module owns one libSQL client
+ * and exposes two tiny helpers: `query` for reading rows and `execute` for
+ * writing them.
  *
- * Where the data lives:
- *   * `file:./prisma/dev.db`  → a normal SQLite file on your machine (local dev)
- *   * `libsql://host`         → Turso, a hosted SQLite-compatible database
- *                               (this is what you use on Vercel)
+ * WHERE THE DATA LIVES
+ * --------------------
+ *   file:./dev.db   → a SQLite file in `prisma/` (local development)
+ *   libsql://…       → a hosted libSQL/Turso database (production on Vercel)
  *
- * Both are the same SQL dialect, so the app behaves identically in both
- * places. See `db/schema.sql` for the table definitions.
+ * WHY THERE IS A FALLBACK
+ * -----------------------
+ * On Vercel the file system is read-only. If the configured database cannot
+ * be written to, the app would be broken with a confusing error. Instead it
+ * falls back to an **in-memory SQLite database** loaded with the bundled demo
+ * dataset. That fallback is NOT silent: `/api/health` reports it, and the
+ * interface shows a banner saying that changes are not saved. As soon as a
+ * real database is attached, it is used and the fallback never happens.
  */
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { createClient, type Client, type InValue } from "@libsql/client";
 
 import { DEFAULT_DATABASE_URL, resolveDatabaseUrl } from "@/lib/database-url";
@@ -38,21 +47,124 @@ export function isRemoteDatabase(): boolean {
   return url.startsWith("libsql://") || url.startsWith("http://") || url.startsWith("https://");
 }
 
+/* -------------------------------------------------------------------------- */
+/* Connection                                                                 */
+/* -------------------------------------------------------------------------- */
+
 let client: Client | undefined;
+let ephemeral = false;
+let ready: Promise<void> | undefined;
 
-function getClient(): Client {
-  if (client) return client;
+/** True when the app is running on an in-memory database (nothing is saved). */
+export function isEphemeralDatabase(): boolean {
+  return ephemeral;
+}
 
-  const url = resolveDatabaseUrl(process.env.DATABASE_URL, process.cwd());
+/** Read the schema file. It is bundled with the app by next.config.ts. */
+function readSchema(): string {
+  const candidates = [
+    path.join(process.cwd(), "db", "schema.sql"),
+    path.join(process.cwd(), "..", "db", "schema.sql"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      return readFileSync(candidate, "utf8");
+    } catch {
+      // Try the next location.
+    }
+  }
+  throw new Error(
+    "db/schema.sql could not be found. The database schema must be included with the deployment.",
+  );
+}
+
+/** Split a schema file into individual statements. */
+function splitStatements(sql: string): string[] {
+  return sql
+    .split(";")
+    .map((statement) =>
+      statement
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("--"))
+        .join("\n")
+        .trim(),
+    )
+    .filter((statement) => statement.length > 0);
+}
+
+/** Can this connection actually be written to? */
+async function isWritable(target: Client): Promise<boolean> {
+  try {
+    await target.execute(
+      "CREATE TABLE IF NOT EXISTS __write_probe (id INTEGER PRIMARY KEY, created_at TEXT)",
+    );
+    await target.execute("DROP TABLE __write_probe");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function connect(): Promise<void> {
+  const url = resolveDatabaseUrl(getDatabaseUrl(), process.cwd());
   const authToken = getDatabaseAuthToken();
 
-  client = createClient({
-    url,
-    ...(authToken ? { authToken } : {}),
-  });
+  const primary = createClient({ url, ...(authToken ? { authToken } : {}) });
 
+  if (await isWritable(primary)) {
+    client = primary;
+    ephemeral = false;
+    return;
+  }
+
+  // The database exists but cannot be written to (a read-only deployment, a
+  // file inside a read-only bundle, a file that is not there yet). Fall back
+  // to an in-memory database so the app still works, and say so out loud.
+  primary.close();
+
+  const memory = createClient({ url: "file::memory:" });
+  const schema = splitStatements(readSchema());
+  for (const statement of schema) {
+    await memory.execute(statement);
+  }
+
+  const { seedDatabase } = await import("@/lib/research/seed");
+  await seedDatabase(memory);
+
+  client = memory;
+  ephemeral = true;
+}
+
+function getClient(): Client {
+  if (!ready) {
+    ready = connect().catch((error) => {
+      // Let the next call try again, but keep the reason for the health check.
+      ready = undefined;
+      throw error;
+    });
+  }
+  // The client is assigned by `connect()`; if it is not ready yet the caller
+  // waits for the same promise.
+  if (!client) {
+    throw new Error("The database connection is still starting. Please retry in a moment.");
+  }
   return client;
 }
+
+/** Wait until the connection is ready (or failed). */
+export async function waitForDatabase(): Promise<void> {
+  if (!ready) {
+    ready = connect().catch((error) => {
+      ready = undefined;
+      throw error;
+    });
+  }
+  await ready;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Queries                                                                    */
+/* -------------------------------------------------------------------------- */
 
 /** A row returned by the database. Values are plain JS types. */
 export type Row = Record<string, unknown>;
@@ -61,12 +173,9 @@ export type Row = Record<string, unknown>;
  * SQLite allows only one writer at a time. When two requests write at the
  * same moment the second one gets `SQLITE_BUSY`. That is not a bug in the
  * query — it is SQLite's locking model — so we wait a moment and retry.
- *
- * On a hosted (Turso) database this is handled by the server, but the retry
- * also makes local development feel solid.
  */
 function isBusyError(error: unknown): boolean {
-  const code = (error as { code?: string; extendedCode?: number } | undefined)?.code;
+  const code = (error as { code?: string } | undefined)?.code;
   const message = error instanceof Error ? error.message : String(error);
   return (
     code === "SQLITE_BUSY" ||
@@ -92,6 +201,7 @@ async function withBusyRetry<T>(operation: () => Promise<T>, attempts = 6): Prom
 
 /** Run a SELECT and return the rows. */
 export async function query<T = Row>(sql: string, params: InValue[] = []): Promise<T[]> {
+  await waitForDatabase();
   const result = await withBusyRetry(() => getClient().execute(sql, params));
   return result.rows as unknown as T[];
 }
@@ -104,20 +214,8 @@ export async function queryOne<T = Row>(sql: string, params: InValue[] = []): Pr
 
 /** Run an INSERT / UPDATE / DELETE. */
 export async function execute(sql: string, params: InValue[] = []): Promise<void> {
+  await waitForDatabase();
   await withBusyRetry(() => getClient().execute(sql, params));
-}
-
-/**
- * Run several statements as one unit of work.
- *
- * libSQL over HTTP does not support multi-statement transactions, so the
- * statements are executed in order. Every statement in this project is
- * idempotent, which makes that safe.
- */
-export async function executeBatch(statements: Array<{ sql: string; params?: InValue[] }>) {
-  for (const statement of statements) {
-    await execute(statement.sql, statement.params ?? []);
-  }
 }
 
 /** A fresh id for a row. */
@@ -136,4 +234,5 @@ export async function closeDatabase(): Promise<void> {
     client.close();
     client = undefined;
   }
+  ready = undefined;
 }

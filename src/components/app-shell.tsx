@@ -27,13 +27,21 @@ const NAV = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [demoMode, setDemoMode] = useState<boolean | null>(null);
+  const [dbDown, setDbDown] = useState(false);
+  const [dbEphemeral, setDbEphemeral] = useState(false);
 
   useEffect(() => {
     let active = true;
     fetch("/api/health")
       .then((response) => response.json())
       .then((data) => {
-        if (active) setDemoMode(Boolean(data.demoMode));
+        if (!active) return;
+        setDemoMode(Boolean(data.demoMode));
+        // A database that cannot be reached or written to is the most common
+        // deployment problem, so say so plainly instead of letting every page
+        // fail silently.
+        setDbDown(data?.database?.ok === false);
+        setDbEphemeral(Boolean(data?.database?.ephemeral));
       })
       .catch(() => {
         if (active) setDemoMode(null);
@@ -45,6 +53,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <>
+      {dbDown ? (
+        <div className="border-b-[3px] border-ink bg-punch px-4 py-2 text-center text-xs font-black uppercase tracking-widest text-ink">
+          The database is not reachable — check DATABASE_URL and DATABASE_AUTH_TOKEN, then
+          redeploy
+        </div>
+      ) : null}
+
+      {dbEphemeral ? (
+        <div className="border-b-[3px] border-ink bg-warn px-4 py-2 text-center text-xs font-black uppercase tracking-widest text-ink">
+          Demo mode — this deployment has no writable database, so nothing you do here is saved.
+          Add DATABASE_URL and DATABASE_AUTH_TOKEN to make it persistent.
+        </div>
+      ) : null}
+
       {demoMode ? (
         <div className="border-[3px] flex items-center justify-center gap-2 border-b-[3px] border-ink bg-acid px-4 py-2 text-center text-xs font-black uppercase tracking-widest text-ink">
           <span className="hidden sm:inline">Demo mode</span>

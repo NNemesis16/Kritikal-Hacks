@@ -11,6 +11,12 @@ const nextConfig: NextConfig = {
   // HTTPS, so no native code is needed at runtime.
   serverExternalPackages: ["@libsql/client", "libsql"],
 
+  // The schema file is read at runtime when the app falls back to an
+  // in-memory database, so it has to travel with the deployment.
+  outputFileTracingIncludes: {
+    "/api/**/*": ["./db/schema.sql"],
+  },
+
   turbopack: {
     rules: {
       "*.css": {
