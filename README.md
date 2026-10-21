@@ -544,23 +544,38 @@ Replace placeholder values with your own credentials. If you are exploring demo 
 
 ## 🌐 Live deployment
 
-The app is deployed and running:
+The app is deployed and running. Share this link with your teammates and the judges:
 
-**https://kritikal-hacks.vercel.app**
+**https://kritikal-hacks-kappa.vercel.app**
 
-Share that link with your teammates and the judges. Everything works there — the research runs,
-the project explorer, the free-choice discovery mode and the exports.
+That URL is stable across deployments, so it will keep working. Everything on it works today —
+the research runs, the project explorer, the free-choice discovery mode, the manual import and the
+Markdown/JSON exports.
 
-The one thing to know: **the demo deployment is running in demo mode**, because no provider API
-keys and no hosted database have been attached to it yet. That means:
+### What mode is it in?
+
+**Demo mode**, because no provider API keys have been attached to it yet. That means:
 
 - the research uses the bundled sample dataset, and every record is labelled as demo data
-- the deployment has no writable database, so anything you save there is not kept
+- the data is stored in a fallback database mirrored to Vercel Blob, so it **is** shared between
+  server instances and survives a cold start
 
-To switch it to live research, add the provider keys and a hosted database (the next section
-explains exactly how) and redeploy. The interface tells you which mode it is in with a banner
-across the top, and `curl https://kritikal-hacks.vercel.app/api/health` reports exactly what is
-configured and what is working.
+The interface tells you which mode it is in with a banner across the top, and this tells you
+exactly what is configured and what is working:
+
+```bash
+curl https://kritikal-hacks-kappa.vercel.app/api/health
+```
+
+### Turning it into the real thing
+
+Two things, in this order:
+
+1. **A hosted database** — create a free Turso database and add `DATABASE_URL` and
+   `DATABASE_AUTH_TOKEN` in Vercel → Settings → Environment Variables. The next section
+   explains exactly how. (The Blob fallback keeps working until you do, so there is no rush.)
+2. **Provider API keys** — add `TINYFISH_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY`
+   the same way, then redeploy. The demo banner disappears and the research becomes live.
 
 ---
 
@@ -624,6 +639,12 @@ Click **Deploy**. In about two minutes you get a URL like
 
 ### Notes
 
+- **The fallback database.** If `DATABASE_URL` is not set, the app cannot write to a local file
+  on Vercel (the file system there is read-only). It then uses a SQLite file in the temporary
+  directory, mirrored to a **Vercel Blob** store that is already connected to the project. Every
+  serverless instance reads and writes the same copy, so a research run started in one request is
+  visible in the next. `/api/health` reports `database.ephemeral` and `database.blobMirrored`
+  so you can see which mode is active. Attaching a real database replaces the fallback entirely.
 - **Function timeouts.** A research run calls three external APIs, so it needs more than the
   default. The routes set `maxDuration = 300`; Vercel clamps that to your plan's limit
   (60 seconds on Hobby, 300 on Pro). If a run stops halfway on Hobby, upgrade the plan or lower
