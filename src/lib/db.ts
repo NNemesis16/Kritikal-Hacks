@@ -92,12 +92,30 @@ async function createBlobMirror(): Promise<BlobMirror | null> {
           // A missing blob is not an error — it just means a fresh database.
         }).catch(() => null);
         if (!result) return null;
+
+        // `get()` returns a readable stream, so read it into bytes.
         if (result instanceof Uint8Array) return result;
-        if (result && typeof result === "object" && "arrayBuffer" in result) {
-          const buffer = await (result as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer();
-          return new Uint8Array(buffer);
+        const stream = (result as { stream?: ReadableStream<Uint8Array> }).stream;
+        if (!stream) return null;
+
+        const reader = stream.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            total += value.byteLength;
+          }
         }
-        return null;
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return bytes;
       },
       async put(bytes) {
         await put(BLOB_PATHNAME, Buffer.from(bytes), {
