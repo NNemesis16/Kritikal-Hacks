@@ -135,6 +135,11 @@ export function hasBlobMirror(): boolean {
   return blobMirror !== null;
 }
 
+/** The last error from the Blob mirror, if any. */
+export function getMirrorError(): string | null {
+  return lastMirrorError;
+}
+
 /** Read the schema file. It is bundled with the app by next.config.ts. */
 function readSchema(): string {
   const candidates = [
@@ -180,6 +185,9 @@ async function isWritable(target: Client): Promise<boolean> {
   }
 }
 
+/** The last error from the Blob mirror, surfaced by /api/health. */
+let lastMirrorError: string | null = null;
+
 /** Upload the local database file to Blob so other instances can see it. */
 async function flushToBlob(): Promise<void> {
   if (!blobMirror || !localFilePath) return;
@@ -189,8 +197,12 @@ async function flushToBlob(): Promise<void> {
   try {
     const bytes = readFileSync(localFilePath);
     await blobMirror.put(new Uint8Array(bytes));
-  } catch {
-    // A failed mirror is not fatal — the data is still in this instance.
+    lastMirrorError = null;
+  } catch (error) {
+    lastMirrorError = error instanceof Error ? error.message : String(error);
+    // The data is still in this instance, so this is not fatal — but it must
+    // be visible, otherwise the mirror silently stops working.
+    console.error("[projectscope] the Blob mirror upload failed:", lastMirrorError);
   }
 }
 

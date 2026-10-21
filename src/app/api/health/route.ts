@@ -1,5 +1,6 @@
 import { getProviderStatus, isDemoMode } from "@/lib/env";
 import {
+  getMirrorError,
   hasBlobMirror,
   isEphemeralDatabase,
   isRemoteDatabase,
@@ -53,6 +54,7 @@ export async function GET() {
       // the shape is reported.
       explicitlyConfigured: Boolean(process.env.DATABASE_URL),
       kind: isRemoteDatabase() ? "hosted (libSQL/Turso)" : "local SQLite file",
+      mirrorError: getMirrorError(),
       message: database.ephemeral
         ? database.blobMirrored
           ? "No DATABASE_URL was set, so the app is using a fallback database that is mirrored to Vercel Blob. Add DATABASE_URL and DATABASE_AUTH_TOKEN to use a real database."
