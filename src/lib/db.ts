@@ -236,26 +236,82 @@ async function flushToBlob(): Promise<void> {
  */
 let pendingFlush: Promise<void> | null = null;
 
-function scheduleFlush(): Promise<void> {
-  if (!blobMirror) return Promise.resolve();
+async function scheduleFlush(): Promise<void> {
+  if (!blobMirror) return;
   dirty = true;
 
-  if (!pendingFlush) {
-    pendingFlush = (async () => {
-      // A short pause lets a burst of writes become one upload.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      try {
-        await flushToBlob();
-      } finally {
-        pendingFlush = null;
-      }
-    })();
-  }
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (!pendingFlush) {
+      pendingFlush = (async () => {
+        // A short pause lets a burst of writes become one upload.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          await flushToBlob();
+        } finally {
+          pendingFlush = null;
+        }
+      })();
+    }
 
-  return pendingFlush;
+    await pendingFlush;
+
+    // If another write landed while the upload was in flight, the copy we
+    // uploaded is stale, so go round again.
+    if (!dirty) return;
+  }
 }
 
-/** Force an upload of the current state. Used before a response is sent. */
+/**
+ * Re-read the shared copy so a warm instance does not serve stale data.
+ *
+ * Every serverless instance keeps its own copy of the file, so an instance
+ * that has been running for a while can be behind. This refreshes it at
+ * most every couple of seconds, which is fast enough for the app to feel
+ * live and slow enough not to hammer the store.
+ */
+const SYNC_INTERVAL_MS = 2_000;
+let lastSyncAt = 0;
+
+async function refreshFromMirror(): Promise<void> {
+  if (!blobMirror || !localFilePath) return;
+  if (dirty) return; // our copy has changes that are not uploaded yet
+
+  const now = Date.now();
+  if (now - lastSyncAt < SYNC_INTERVAL_MS) return;
+  lastSyncAt = now;
+
+  try {
+    const bytes = await blobMirror.get();
+    if (!bytes || bytes.byteLength === 0) return;
+
+    // Replace the file and reopen the client, so the connection sees the new
+    // content rather than the file it had open.
+    client?.close();
+    writeFileSync(localFilePath, bytes);
+    client = createClient({ url: `file:${localFilePath}` });
+  } catch {
+    // A failed refresh is not fatal — the local copy still works.
+  }
+}
+
+/**
+ * Database operations run one at a time.
+ *
+ * SQLite has a single writer, and the refresh above replaces the file the
+ * client has open. Running the operations in a queue keeps both safe.
+ */
+let queue: Promise<unknown> = Promise.resolve();
+
+function serialise<T>(operation: () => Promise<T>): Promise<T> {
+  const result = queue.then(operation, operation);
+  queue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+/** Force an upload of the current state. */
 export async function flushDatabase(): Promise<void> {
   if (pendingFlush) {
     await pendingFlush;
@@ -375,8 +431,11 @@ async function withBusyRetry<T>(operation: () => Promise<T>, attempts = 6): Prom
 /** Run a SELECT and return the rows. */
 export async function query<T = Row>(sql: string, params: InValue[] = []): Promise<T[]> {
   await waitForDatabase();
-  const result = await withBusyRetry(() => getClient().execute(sql, params));
-  return result.rows as unknown as T[];
+  return serialise(async () => {
+    await refreshFromMirror();
+    const result = await withBusyRetry(() => getClient().execute(sql, params));
+    return result.rows as unknown as T[];
+  });
 }
 
 /** Run a SELECT and return the first row, or null. */
@@ -388,11 +447,14 @@ export async function queryOne<T = Row>(sql: string, params: InValue[] = []): Pr
 /** Run an INSERT / UPDATE / DELETE. */
 export async function execute(sql: string, params: InValue[] = []): Promise<void> {
   await waitForDatabase();
-  await withBusyRetry(() => getClient().execute(sql, params));
-  // Mirror the change so other serverless instances can see it. This is
-  // awaited: a serverless function can be frozen as soon as its response is
-  // sent, so a deferred upload would be lost.
-  await scheduleFlush();
+  await serialise(async () => {
+    await refreshFromMirror();
+    await withBusyRetry(() => getClient().execute(sql, params));
+    // Mirror the change so other serverless instances can see it. This is
+    // awaited: a serverless function can be frozen as soon as its response is
+    // sent, so a deferred upload would be lost.
+    await scheduleFlush();
+  });
 }
 
 /** A fresh id for a row. */
